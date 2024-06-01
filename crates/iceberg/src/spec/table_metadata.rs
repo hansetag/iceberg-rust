@@ -37,7 +37,8 @@ use crate::error::Result;
 use crate::{Error, ErrorKind, TableCreation};
 use chrono::{DateTime, TimeZone, Utc};
 
-static MAIN_BRANCH: &str = "main";
+/// Main branch name
+pub static MAIN_BRANCH: &str = "main";
 /// Default spec id (unpartitioned)
 pub static DEFAULT_SPEC_ID: i32 = 0;
 /// Default sort order id (unsorted)
