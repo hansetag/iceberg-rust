@@ -59,9 +59,9 @@ impl PartitionField {
 #[serde(rename_all = "kebab-case")]
 pub struct PartitionSpec {
     /// Identifier for PartitionSpec
-    pub(crate) spec_id: i32,
+    pub spec_id: i32,
     /// Details of the partition spec
-    pub(crate) fields: Vec<PartitionField>,
+    pub fields: Vec<PartitionField>,
 }
 
 impl PartitionSpec {
@@ -146,9 +146,9 @@ pub struct UnboundPartitionField {
 #[serde(rename_all = "kebab-case")]
 pub struct UnboundPartitionSpec {
     /// Identifier for PartitionSpec
-    pub(crate) spec_id: Option<i32>,
+    pub spec_id: Option<i32>,
     /// Details of the partition spec
-    pub(crate) fields: Vec<UnboundPartitionField>,
+    pub fields: Vec<UnboundPartitionField>,
 }
 
 impl UnboundPartitionSpec {
