@@ -38,8 +38,10 @@ use crate::{Error, ErrorKind, TableCreation};
 use chrono::{DateTime, TimeZone, Utc};
 
 static MAIN_BRANCH: &str = "main";
-static DEFAULT_SPEC_ID: i32 = 0;
-static DEFAULT_SORT_ORDER_ID: i64 = 0;
+/// Default spec id (unpartitioned)
+pub static DEFAULT_SPEC_ID: i32 = 0;
+/// Default sort order id (unsorted)
+pub static DEFAULT_SORT_ORDER_ID: i64 = 0;
 
 pub(crate) static EMPTY_SNAPSHOT_ID: i64 = -1;
 pub(crate) static INITIAL_SEQUENCE_NUMBER: i64 = 0;
