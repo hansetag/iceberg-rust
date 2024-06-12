@@ -55,46 +55,46 @@ pub type TableMetadataRef = Arc<TableMetadata>;
 /// We check the validity of this data structure when constructing.
 pub struct TableMetadata {
     /// Integer Version for the format.
-    pub(crate) format_version: FormatVersion,
+    pub format_version: FormatVersion,
     /// A UUID that identifies the table
-    pub(crate) table_uuid: Uuid,
+    pub table_uuid: Uuid,
     /// Location tables base location
-    pub(crate) location: String,
+    pub location: String,
     /// The tables highest sequence number
-    pub(crate) last_sequence_number: i64,
+    pub last_sequence_number: i64,
     /// Timestamp in milliseconds from the unix epoch when the table was last updated.
-    pub(crate) last_updated_ms: i64,
+    pub last_updated_ms: i64,
     /// An integer; the highest assigned column ID for the table.
-    pub(crate) last_column_id: i32,
+    pub last_column_id: i32,
     /// A list of schemas, stored as objects with schema-id.
-    pub(crate) schemas: HashMap<i32, SchemaRef>,
+    pub schemas: HashMap<i32, SchemaRef>,
     /// ID of the table’s current schema.
-    pub(crate) current_schema_id: i32,
+    pub current_schema_id: i32,
     /// A list of partition specs, stored as full partition spec objects.
-    pub(crate) partition_specs: HashMap<i32, PartitionSpecRef>,
+    pub partition_specs: HashMap<i32, PartitionSpecRef>,
     /// ID of the “current” spec that writers should use by default.
-    pub(crate) default_spec_id: i32,
+    pub default_spec_id: i32,
     /// An integer; the highest assigned partition field ID across all partition specs for the table.
-    pub(crate) last_partition_id: i32,
+    pub last_partition_id: i32,
     ///A string to string map of table properties. This is used to control settings that
     /// affect reading and writing and is not intended to be used for arbitrary metadata.
     /// For example, commit.retry.num-retries is used to control the number of commit retries.
-    pub(crate) properties: HashMap<String, String>,
+    pub properties: HashMap<String, String>,
     /// long ID of the current table snapshot; must be the same as the current
     /// ID of the main branch in refs.
-    pub(crate) current_snapshot_id: Option<i64>,
+    pub current_snapshot_id: Option<i64>,
     ///A list of valid snapshots. Valid snapshots are snapshots for which all
     /// data files exist in the file system. A data file must not be deleted
     /// from the file system until the last snapshot in which it was listed is
     /// garbage collected.
-    pub(crate) snapshots: HashMap<i64, SnapshotRef>,
+    pub snapshots: HashMap<i64, SnapshotRef>,
     /// A list (optional) of timestamp and snapshot ID pairs that encodes changes
     /// to the current snapshot for the table. Each time the current-snapshot-id
     /// is changed, a new entry should be added with the last-updated-ms
     /// and the new current-snapshot-id. When snapshots are expired from
     /// the list of valid snapshots, all entries before a snapshot that has
     /// expired should be removed.
-    pub(crate) snapshot_log: Vec<SnapshotLog>,
+    pub snapshot_log: Vec<SnapshotLog>,
 
     /// A list (optional) of timestamp and metadata file location pairs
     /// that encodes changes to the previous metadata files for the table.
@@ -102,19 +102,19 @@ pub struct TableMetadata {
     /// previous metadata file location should be added to the list.
     /// Tables can be configured to remove oldest metadata log entries and
     /// keep a fixed-size log of the most recent entries after a commit.
-    pub(crate) metadata_log: Vec<MetadataLog>,
+    pub metadata_log: Vec<MetadataLog>,
 
     /// A list of sort orders, stored as full sort order objects.
-    pub(crate) sort_orders: HashMap<i64, SortOrderRef>,
+    pub sort_orders: HashMap<i64, SortOrderRef>,
     /// Default sort order id of the table. Note that this could be used by
     /// writers, but is not used when reading because reads use the specs
     /// stored in manifest files.
-    pub(crate) default_sort_order_id: i64,
+    pub default_sort_order_id: i64,
     ///A map of snapshot references. The map keys are the unique snapshot reference
     /// names in the table, and the map values are snapshot reference objects.
     /// There is always a main branch reference pointing to the current-snapshot-id
     /// even if the refs map is null.
-    pub(crate) refs: HashMap<String, SnapshotReference>,
+    pub refs: HashMap<String, SnapshotReference>,
 }
 
 impl TableMetadata {
