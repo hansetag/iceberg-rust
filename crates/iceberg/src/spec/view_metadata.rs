@@ -163,6 +163,32 @@ impl ViewMetadataBuilder {
         Self(origin)
     }
 
+
+    /// Missing doc
+    pub fn from_parts(
+                          format_version: ViewFormatVersion,
+                          view_uuid: Uuid,
+                          location: String,
+                          current_version_id: i64,
+                          versions: HashMap<i64, ViewVersionRef>,
+                          version_log: Vec<ViewVersionLog>,
+                          schemas: HashMap<i32, SchemaRef>,
+                          properties: HashMap<String, String>,) -> Self {
+        Self(ViewMetadata {
+            format_version,
+            view_uuid,
+            location,
+            current_version_id,
+            versions,
+            version_log,
+            schemas,
+            properties,
+        })
+
+    }
+
+
+
     /// Creates a new view metadata builder from the given view creation.
     pub fn from_view_creation(view_creation: ViewCreation) -> Result<Self> {
         let ViewCreation {
