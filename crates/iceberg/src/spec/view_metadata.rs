@@ -47,11 +47,11 @@ pub type ViewMetadataRef = Arc<ViewMetadata>;
 /// We check the validity of this data structure when constructing.
 pub struct ViewMetadata {
     /// Integer Version for the format.
-    pub(crate) format_version: ViewFormatVersion,
+    pub format_version: ViewFormatVersion,
     /// A UUID that identifies the view, generated when the view is created.
-    pub(crate) view_uuid: Uuid,
+    pub view_uuid: Uuid,
     /// The view's base location; used to create metadata file locations
-    pub(crate) location: String,
+    pub location: String,
     /// ID of the current version of the view (version-id)
     pub current_version_id: i64,
     /// A list of known versions of the view
@@ -60,11 +60,11 @@ pub struct ViewMetadata {
     /// change to current-version-id
     pub version_log: Vec<ViewVersionLog>,
     /// A list of schemas, stored as objects with schema-id.
-    pub(crate) schemas: HashMap<i32, SchemaRef>,
+    pub schemas: HashMap<i32, SchemaRef>,
     /// A string to string map of view properties.
     /// Properties are used for metadata such as comment and for settings that
     /// affect view maintenance. This is not intended to be used for arbitrary metadata.
-    pub(crate) properties: HashMap<String, String>,
+    pub properties: HashMap<String, String>,
 }
 
 impl ViewMetadata {
@@ -188,7 +188,6 @@ impl ViewMetadataBuilder {
     }
 
 
-
     /// Creates a new view metadata builder from the given view creation.
     pub fn from_view_creation(view_creation: ViewCreation) -> Result<Self> {
         let ViewCreation {
@@ -254,6 +253,14 @@ impl ViewVersionLog {
     /// Returns the last updated timestamp as a DateTime<Utc> with millisecond precision
     pub fn timestamp(self) -> DateTime<Utc> {
         Utc.timestamp_millis_opt(self.timestamp_ms).unwrap()
+    }
+
+    /// Returns a new ViewVersionLog with the current timestamp
+    pub fn now(version_id: i64) -> Self {
+        Self {
+            version_id,
+            timestamp_ms: Utc::now().timestamp_millis(),
+        }
     }
 }
 
