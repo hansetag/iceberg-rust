@@ -38,6 +38,7 @@ pub use catalog::TableIdent;
 pub use catalog::TableRequirement;
 pub use catalog::TableUpdate;
 pub use catalog::ViewCreation;
+pub use catalog::ViewUpdate;
 
 #[allow(dead_code)]
 pub mod table;

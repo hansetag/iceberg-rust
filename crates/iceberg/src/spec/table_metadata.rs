@@ -45,7 +45,8 @@ pub static DEFAULT_SPEC_ID: i32 = 0;
 pub static DEFAULT_SORT_ORDER_ID: i64 = 0;
 
 pub(crate) static EMPTY_SNAPSHOT_ID: i64 = -1;
-pub(crate) static INITIAL_SEQUENCE_NUMBER: i64 = 0;
+// TODO: spark numbers from one and so does tabular
+pub(crate) static INITIAL_SEQUENCE_NUMBER: i64 = 1;
 
 /// Reference to [`TableMetadata`].
 pub type TableMetadataRef = Arc<TableMetadata>;

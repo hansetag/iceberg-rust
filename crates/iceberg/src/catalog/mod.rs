@@ -19,7 +19,7 @@
 
 use crate::spec::{
     FormatVersion, Schema, Snapshot, SnapshotReference, SortOrder, TableMetadataBuilder,
-    UnboundPartitionSpec, ViewRepresentation,
+    UnboundPartitionSpec, ViewRepresentation, ViewVersion,
 };
 use crate::table::Table;
 use crate::{Error, ErrorKind, Result};
@@ -461,6 +461,64 @@ pub struct ViewCreation {
     /// Typical keys are "engine-name" and "engine-version"
     #[builder(default)]
     pub summary: HashMap<String, String>,
+}
+
+/// ViewUpdate represents an update to a view in the catalog.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum ViewUpdate {
+    /// Assign a new UUID to the view
+    #[serde(rename_all = "kebab-case")]
+    AssignUuid {
+        /// The new UUID to assign.
+        uuid: uuid::Uuid,
+    },
+    /// Upgrade view's format version
+    #[serde(rename_all = "kebab-case")]
+    UpgradeFormatVersion {
+        /// Target format upgrade to.
+        format_version: i32,
+    },
+    /// Add a new schema to the view
+    #[serde(rename_all = "kebab-case")]
+    AddSchema {
+        /// The schema to add.
+        schema: Schema,
+        /// The last column id of the view.
+        last_column_id: Option<i32>,
+    },
+    /// Set view's current schema
+    #[serde(rename_all = "kebab-case")]
+    SetLocation {
+        /// New location for view.
+        location: String,
+    },
+    /// Set view's properties
+    ///
+    /// Matching keys are updated, and non-matching keys are left unchanged.
+    #[serde(rename_all = "kebab-case")]
+    SetProperties {
+        /// Properties to update for view.
+        updates: HashMap<String, String>,
+    },
+    /// Remove view's properties
+    #[serde(rename_all = "kebab-case")]
+    RemoveProperties {
+        /// Properties to remove
+        removals: Vec<String>,
+    },
+    /// Add a new version to the view
+    #[serde(rename_all = "kebab-case")]
+    AddViewVersion {
+        /// The view version to add.
+        view_version: ViewVersion,
+    },
+    /// Set view's current version
+    #[serde(rename_all = "kebab-case")]
+    SetCurrentViewVersion {
+        /// View version id to set as current, or -1 to set last added version
+        view_version_id: i32,
+    },
 }
 
 #[cfg(test)]
