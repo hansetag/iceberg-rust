@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use typed_builder::TypedBuilder;
 
-use super::view_metadata::ViewVersionLog;
 use crate::catalog::NamespaceIdent;
 use crate::spec::{SchemaId, SchemaRef, ViewMetadata};
 use crate::{Error, ErrorKind};
@@ -111,13 +110,6 @@ impl ViewVersion {
             })
             .cloned();
         r
-    }
-
-    pub(crate) fn log(&self) -> ViewVersionLog {
-        ViewVersionLog {
-            timestamp_ms: self.timestamp_ms,
-            version_id: self.version_id,
-        }
     }
 }
 
