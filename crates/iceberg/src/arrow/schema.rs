@@ -26,6 +26,7 @@ use crate::{Error, ErrorKind};
 use arrow_array::types::{validate_decimal_precision_and_scale, Decimal128Type};
 use arrow_array::{
     BooleanArray, Datum as ArrowDatum, Float32Array, Float64Array, Int32Array, Int64Array,
+    StringArray,
 };
 use arrow_schema::{DataType, Field, Fields, Schema as ArrowSchema, TimeUnit};
 use bitvec::macros::internal::funty::Fundamental;
@@ -33,6 +34,9 @@ use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// When iceberg map type convert to Arrow map type, the default map field name is "key_value".
+pub(crate) const DEFAULT_MAP_FIELD_NAME: &str = "key_value";
 
 /// A post order arrow schema visitor.
 ///
@@ -499,9 +503,10 @@ impl SchemaVisitor for ToArrowSchemaConverter {
             _ => unreachable!(),
         };
         let field = Field::new(
-            "entries",
+            DEFAULT_MAP_FIELD_NAME,
             DataType::Struct(vec![key_field, value_field].into()),
-            map.value_field.required,
+            // Map field is always not nullable
+            false,
         );
 
         Ok(ArrowSchemaOrFieldOrType::Type(DataType::Map(
@@ -561,7 +566,7 @@ impl SchemaVisitor for ToArrowSchemaConverter {
                 Ok(ArrowSchemaOrFieldOrType::Type(DataType::Date32))
             }
             crate::spec::PrimitiveType::Time => Ok(ArrowSchemaOrFieldOrType::Type(
-                DataType::Time32(TimeUnit::Microsecond),
+                DataType::Time64(TimeUnit::Microsecond),
             )),
             crate::spec::PrimitiveType::Timestamp => Ok(ArrowSchemaOrFieldOrType::Type(
                 DataType::Timestamp(TimeUnit::Microsecond, None),
@@ -605,6 +610,7 @@ pub(crate) fn get_arrow_datum(datum: &Datum) -> Result<Box<dyn ArrowDatum + Send
         PrimitiveLiteral::Long(value) => Ok(Box::new(Int64Array::new_scalar(*value))),
         PrimitiveLiteral::Float(value) => Ok(Box::new(Float32Array::new_scalar(value.as_f32()))),
         PrimitiveLiteral::Double(value) => Ok(Box::new(Float64Array::new_scalar(value.as_f64()))),
+        PrimitiveLiteral::String(value) => Ok(Box::new(StringArray::new_scalar(value.as_str()))),
         l => Err(Error::new(
             ErrorKind::FeatureUnsupported,
             format!(
@@ -657,10 +663,9 @@ mod tests {
         let r#struct = DataType::Struct(fields);
         let map = DataType::Map(
             Arc::new(
-                Field::new("entries", r#struct, false).with_metadata(HashMap::from([(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    "19".to_string(),
-                )])),
+                Field::new(DEFAULT_MAP_FIELD_NAME, r#struct, false).with_metadata(HashMap::from([
+                    (PARQUET_FIELD_ID_META_KEY.to_string(), "19".to_string()),
+                ])),
             ),
             false,
         );
@@ -1022,7 +1027,10 @@ mod tests {
         ]);
 
         let r#struct = DataType::Struct(fields);
-        let map = DataType::Map(Arc::new(Field::new("entries", r#struct, false)), false);
+        let map = DataType::Map(
+            Arc::new(Field::new(DEFAULT_MAP_FIELD_NAME, r#struct, false)),
+            false,
+        );
 
         let fields = Fields::from(vec![
             Field::new("aa", DataType::Int32, false).with_metadata(HashMap::from([(
@@ -1086,7 +1094,7 @@ mod tests {
                 PARQUET_FIELD_ID_META_KEY.to_string(),
                 "8".to_string(),
             )])),
-            Field::new("i", DataType::Time32(TimeUnit::Microsecond), false).with_metadata(
+            Field::new("i", DataType::Time64(TimeUnit::Microsecond), false).with_metadata(
                 HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "9".to_string())]),
             ),
             Field::new(

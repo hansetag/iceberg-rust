@@ -41,38 +41,37 @@ pub(crate) const MAX_DECIMAL_BYTES: u32 = 24;
 pub(crate) const MAX_DECIMAL_PRECISION: u32 = 38;
 
 mod _decimal {
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
 
     use crate::spec::{MAX_DECIMAL_BYTES, MAX_DECIMAL_PRECISION};
 
-    lazy_static! {
-        // Max precision of bytes, starts from 1
-        pub(super) static ref MAX_PRECISION: [u32; MAX_DECIMAL_BYTES as usize] = {
-            let mut ret: [u32; 24] = [0; 24];
-            for (i, prec) in ret.iter_mut().enumerate() {
-                *prec = 2f64.powi((8 * (i + 1) - 1) as i32).log10().floor() as u32;
-            }
+    // Max precision of bytes, starts from 1
+    pub(super) static MAX_PRECISION: Lazy<[u32; MAX_DECIMAL_BYTES as usize]> = Lazy::new(|| {
+        let mut ret: [u32; 24] = [0; 24];
+        for (i, prec) in ret.iter_mut().enumerate() {
+            *prec = 2f64.powi((8 * (i + 1) - 1) as i32).log10().floor() as u32;
+        }
 
-            ret
-        };
+        ret
+    });
 
-        //  Required bytes of precision, starts from 1
-        pub(super) static ref REQUIRED_LENGTH: [u32; MAX_DECIMAL_PRECISION as usize] = {
-            let mut ret: [u32; MAX_DECIMAL_PRECISION as usize] = [0; MAX_DECIMAL_PRECISION as usize];
+    //  Required bytes of precision, starts from 1
+    pub(super) static REQUIRED_LENGTH: Lazy<[u32; MAX_DECIMAL_PRECISION as usize]> =
+        Lazy::new(|| {
+            let mut ret: [u32; MAX_DECIMAL_PRECISION as usize] =
+                [0; MAX_DECIMAL_PRECISION as usize];
 
             for (i, required_len) in ret.iter_mut().enumerate() {
                 for j in 0..MAX_PRECISION.len() {
-                    if MAX_PRECISION[j] >= ((i+1) as u32) {
-                        *required_len = (j+1) as u32;
+                    if MAX_PRECISION[j] >= ((i + 1) as u32) {
+                        *required_len = (j + 1) as u32;
                         break;
                     }
                 }
             }
 
             ret
-        };
-
-    }
+        });
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -667,6 +666,13 @@ pub struct ListType {
     pub element_field: NestedFieldRef,
 }
 
+impl ListType {
+    /// Construct a list type with the given element field.
+    pub fn new(element_field: NestedFieldRef) -> Self {
+        Self { element_field }
+    }
+}
+
 /// Module for type serialization/deserialization.
 pub(super) mod _serde {
     use crate::spec::datatypes::Type::Map;
@@ -780,6 +786,16 @@ pub struct MapType {
     pub key_field: NestedFieldRef,
     /// Field for value.
     pub value_field: NestedFieldRef,
+}
+
+impl MapType {
+    /// Construct a map type with the given key and value fields.
+    pub fn new(key_field: NestedFieldRef, value_field: NestedFieldRef) -> Self {
+        Self {
+            key_field,
+            value_field,
+        }
+    }
 }
 
 #[cfg(test)]

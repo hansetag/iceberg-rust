@@ -15,8 +15,6 @@
 # specific language governing permissions and limitations
 # under the License.
 
-version: '3.8'
-
 services:
   minio:
     image: minio/minio:RELEASE.2024-03-07T00-43-48Z
@@ -43,6 +41,7 @@ services:
   hive-metastore:
     image: iceberg-hive-metastore
     build: ./hms_catalog/
+    platform: ${DOCKER_DEFAULT_PLATFORM}
     expose:
       - 9083
     environment:

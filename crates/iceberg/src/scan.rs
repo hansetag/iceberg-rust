@@ -49,7 +49,6 @@ pub struct TableScanBuilder<'a> {
     table: &'a Table,
     // Empty column names means to select all columns
     column_names: Vec<String>,
-    predicates: Option<Predicate>,
     snapshot_id: Option<i64>,
     batch_size: Option<usize>,
     case_sensitive: bool,
@@ -61,7 +60,6 @@ impl<'a> TableScanBuilder<'a> {
         Self {
             table,
             column_names: vec![],
-            predicates: None,
             snapshot_id: None,
             batch_size: None,
             case_sensitive: true,
@@ -93,12 +91,6 @@ impl<'a> TableScanBuilder<'a> {
     /// Select all columns.
     pub fn select_all(mut self) -> Self {
         self.column_names.clear();
-        self
-    }
-
-    /// Add a predicate to the scan. The scan will only return rows that match the predicate.
-    pub fn filter(mut self, predicate: Predicate) -> Self {
-        self.predicates = Some(predicate);
         self
     }
 
@@ -161,17 +153,56 @@ impl<'a> TableScanBuilder<'a> {
             }
         }
 
-        let bound_predicates = if let Some(ref predicates) = self.predicates {
+        let bound_predicates = if let Some(ref predicates) = self.filter {
             Some(predicates.bind(schema.clone(), true)?)
         } else {
             None
         };
+
+        let mut field_ids = vec![];
+        for column_name in &self.column_names {
+            let field_id = schema.field_id_by_name(column_name).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::DataInvalid,
+                    format!(
+                        "Column {} not found in table. Schema: {}",
+                        column_name, schema
+                    ),
+                )
+            })?;
+
+            let field = schema
+                .as_struct()
+                .field_by_id(field_id)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::FeatureUnsupported,
+                        format!(
+                            "Column {} is not a direct child of schema but a nested field, which is not supported now. Schema: {}",
+                            column_name, schema
+                        ),
+                    )
+                })?;
+
+            if !field.field_type.is_primitive() {
+                return Err(Error::new(
+                    ErrorKind::FeatureUnsupported,
+                    format!(
+                        "Column {} is not a primitive type. Schema: {}",
+                        column_name, schema
+                    ),
+                ));
+            }
+
+            field_ids.push(field_id);
+        }
 
         Ok(TableScan {
             snapshot,
             file_io: self.table.file_io().clone(),
             table_metadata: self.table.metadata_ref(),
             column_names: self.column_names,
+            field_ids,
             bound_predicates,
             schema,
             batch_size: self.batch_size,
@@ -183,12 +214,12 @@ impl<'a> TableScanBuilder<'a> {
 
 /// Table scan.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct TableScan {
     snapshot: SnapshotRef,
     table_metadata: TableMetadataRef,
     file_io: FileIO,
     column_names: Vec<String>,
+    field_ids: Vec<i32>,
     bound_predicates: Option<BoundPredicate>,
     schema: SchemaRef,
     batch_size: Option<usize>,
@@ -211,6 +242,9 @@ impl TableScan {
         let mut partition_filter_cache = PartitionFilterCache::new();
         let mut manifest_evaluator_cache = ManifestEvaluatorCache::new();
         let mut expression_evaluator_cache = ExpressionEvaluatorCache::new();
+
+        let field_ids = self.field_ids.clone();
+        let bound_predicates = self.bound_predicates.clone();
 
         Ok(try_stream! {
             let manifest_list = context
@@ -280,6 +314,9 @@ impl TableScan {
                                 data_file_path: manifest_entry.data_file().file_path().to_string(),
                                 start: 0,
                                 length: manifest_entry.file_size_in_bytes(),
+                                project_field_ids: field_ids.clone(),
+                                predicate: bound_predicates.clone(),
+                                schema: context.schema.clone(),
                             });
                             yield scan_task?;
                         }
@@ -292,55 +329,10 @@ impl TableScan {
 
     /// Returns an [`ArrowRecordBatchStream`].
     pub async fn to_arrow(&self) -> Result<ArrowRecordBatchStream> {
-        let mut arrow_reader_builder =
-            ArrowReaderBuilder::new(self.file_io.clone(), self.schema.clone());
-
-        let mut field_ids = vec![];
-        for column_name in &self.column_names {
-            let field_id = self.schema.field_id_by_name(column_name).ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!(
-                        "Column {} not found in table. Schema: {}",
-                        column_name, self.schema
-                    ),
-                )
-            })?;
-
-            let field = self.schema
-                .as_struct()
-                .field_by_id(field_id)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::FeatureUnsupported,
-                        format!(
-                            "Column {} is not a direct child of schema but a nested field, which is not supported now. Schema: {}",
-                            column_name, self.schema
-                        ),
-                    )
-                })?;
-
-            if !field.field_type.is_primitive() {
-                return Err(Error::new(
-                    ErrorKind::FeatureUnsupported,
-                    format!(
-                        "Column {} is not a primitive type. Schema: {}",
-                        column_name, self.schema
-                    ),
-                ));
-            }
-
-            field_ids.push(field_id as usize);
-        }
-
-        arrow_reader_builder = arrow_reader_builder.with_field_ids(field_ids);
+        let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone());
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
-        }
-
-        if let Some(ref bound_predicates) = self.bound_predicates {
-            arrow_reader_builder = arrow_reader_builder.with_predicates(bound_predicates.clone());
         }
 
         arrow_reader_builder.build().read(self.plan_files().await?)
@@ -352,6 +344,11 @@ impl TableScan {
             return true;
         }
         false
+    }
+
+    /// Returns a reference to the column names of the table scan.
+    pub fn column_names(&self) -> &[String] {
+        &self.column_names
     }
 }
 
@@ -499,10 +496,12 @@ impl ExpressionEvaluatorCache {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileScanTask {
     data_file_path: String,
-    #[allow(dead_code)]
     start: u64,
-    #[allow(dead_code)]
     length: u64,
+    project_field_ids: Vec<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predicate: Option<BoundPredicate>,
+    schema: SchemaRef,
 }
 
 impl FileScanTask {
@@ -510,21 +509,39 @@ impl FileScanTask {
     pub fn data_file_path(&self) -> &str {
         &self.data_file_path
     }
+
+    /// Returns the project field id of this file scan task.
+    pub fn project_field_ids(&self) -> &[i32] {
+        &self.project_field_ids
+    }
+
+    /// Returns the predicate of this file scan task.
+    pub fn predicate(&self) -> Option<&BoundPredicate> {
+        self.predicate.as_ref()
+    }
+
+    /// Returns the schema id of this file scan task.
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::expr::Reference;
+    use crate::arrow::ArrowReaderBuilder;
+    use crate::expr::{BoundPredicate, Reference};
     use crate::io::{FileIO, OutputFile};
+    use crate::scan::FileScanTask;
     use crate::spec::{
         DataContentType, DataFileBuilder, DataFileFormat, Datum, FormatVersion, Literal, Manifest,
         ManifestContentType, ManifestEntry, ManifestListWriter, ManifestMetadata, ManifestStatus,
-        ManifestWriter, Struct, TableMetadata, EMPTY_SNAPSHOT_ID,
+        ManifestWriter, NestedField, PrimitiveType, Schema, Struct, TableMetadata, Type,
+        EMPTY_SNAPSHOT_ID,
     };
     use crate::table::Table;
     use crate::TableIdent;
-    use arrow_array::{ArrayRef, Int64Array, RecordBatch};
-    use futures::TryStreamExt;
+    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use futures::{stream, TryStreamExt};
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
     use parquet::basic::Compression;
     use parquet::file::properties::WriterProperties;
@@ -705,10 +722,15 @@ mod tests {
                             PARQUET_FIELD_ID_META_KEY.to_string(),
                             "3".to_string(),
                         )])),
+                    arrow_schema::Field::new("a", arrow_schema::DataType::Utf8, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "4".to_string(),
+                        )])),
                 ];
                 Arc::new(arrow_schema::Schema::new(fields))
             };
-            // 3 columns:
+            // 4 columns:
             // x: [1, 1, 1, 1, ...]
             let col1 = Arc::new(Int64Array::from_iter_values(vec![1; 1024])) as ArrayRef;
 
@@ -725,7 +747,14 @@ mod tests {
 
             // z: [3, 3, 3, 3, ..., 4, 4, 4, 4]
             let col3 = Arc::new(Int64Array::from_iter_values(values)) as ArrayRef;
-            let to_write = RecordBatch::try_new(schema.clone(), vec![col1, col2, col3]).unwrap();
+
+            // a: ["Apache", "Apache", "Apache", ..., "Iceberg", "Iceberg", "Iceberg"]
+            let mut values = vec!["Apache"; 512];
+            values.append(vec!["Iceberg"; 512].as_mut());
+            let col4 = Arc::new(StringArray::from_iter_values(values)) as ArrayRef;
+
+            let to_write =
+                RecordBatch::try_new(schema.clone(), vec![col1, col2, col3, col4]).unwrap();
 
             // Write the Parquet files
             let props = WriterProperties::builder()
@@ -773,7 +802,7 @@ mod tests {
     fn test_select_no_exist_column() {
         let table = TableTestFixture::new().table;
 
-        let table_scan = table.scan().select(["x", "y", "z", "a"]).build();
+        let table_scan = table.scan().select(["x", "y", "z", "a", "b"]).build();
         assert!(table_scan.is_err());
     }
 
@@ -862,6 +891,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_open_parquet_no_deletions_by_separate_reader() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Create table scan for current snapshot and plan files
+        let table_scan = fixture.table.scan().build().unwrap();
+
+        let mut plan_task: Vec<_> = table_scan
+            .plan_files()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(plan_task.len(), 2);
+
+        let reader = ArrowReaderBuilder::new(fixture.table.file_io().clone()).build();
+        let batch_stream = reader
+            .clone()
+            .read(Box::pin(stream::iter(vec![Ok(plan_task.remove(0))])))
+            .unwrap();
+        let batche1: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        let reader = ArrowReaderBuilder::new(fixture.table.file_io().clone()).build();
+        let batch_stream = reader
+            .read(Box::pin(stream::iter(vec![Ok(plan_task.remove(0))])))
+            .unwrap();
+        let batche2: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batche1, batche2);
+    }
+
+    #[tokio::test]
     async fn test_open_parquet_with_projection() {
         let mut fixture = TableTestFixture::new();
         fixture.setup_manifest_files().await;
@@ -892,7 +954,7 @@ mod tests {
         // Filter: y < 3
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").less_than(Datum::long(3));
-        builder = builder.filter(predicate);
+        builder = builder.with_filter(predicate);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -918,7 +980,7 @@ mod tests {
         // Filter: y >= 5
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").greater_than_or_equal_to(Datum::long(5));
-        builder = builder.filter(predicate);
+        builder = builder.with_filter(predicate);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -944,7 +1006,7 @@ mod tests {
         // Filter: y is null
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").is_null();
-        builder = builder.filter(predicate);
+        builder = builder.with_filter(predicate);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -961,7 +1023,7 @@ mod tests {
         // Filter: y is not null
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").is_not_null();
-        builder = builder.filter(predicate);
+        builder = builder.with_filter(predicate);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -980,7 +1042,7 @@ mod tests {
         let predicate = Reference::new("y")
             .less_than(Datum::long(5))
             .and(Reference::new("z").greater_than_or_equal_to(Datum::long(4)));
-        builder = builder.filter(predicate);
+        builder = builder.with_filter(predicate);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1014,7 +1076,7 @@ mod tests {
         let predicate = Reference::new("y")
             .less_than(Datum::long(5))
             .or(Reference::new("z").greater_than_or_equal_to(Datum::long(4)));
-        builder = builder.filter(predicate);
+        builder = builder.with_filter(predicate);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1039,5 +1101,142 @@ mod tests {
         values.append(vec![4; 512].as_mut());
         let expected_z = Arc::new(Int64Array::from_iter_values(values)) as ArrayRef;
         assert_eq!(col, &expected_z);
+    }
+
+    #[tokio::test]
+    async fn test_filter_on_arrow_startswith() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: a STARTSWITH "Ice"
+        let mut builder = fixture.table.scan();
+        let predicate = Reference::new("a").starts_with(Datum::string("Ice"));
+        builder = builder.with_filter(predicate);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches[0].num_rows(), 512);
+
+        let col = batches[0].column_by_name("a").unwrap();
+        let string_arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(string_arr.value(0), "Iceberg");
+    }
+
+    #[tokio::test]
+    async fn test_filter_on_arrow_not_startswith() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: a NOT STARTSWITH "Ice"
+        let mut builder = fixture.table.scan();
+        let predicate = Reference::new("a").not_starts_with(Datum::string("Ice"));
+        builder = builder.with_filter(predicate);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches[0].num_rows(), 512);
+
+        let col = batches[0].column_by_name("a").unwrap();
+        let string_arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(string_arr.value(0), "Apache");
+    }
+
+    #[tokio::test]
+    async fn test_filter_on_arrow_in() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: a IN ("Sioux", "Iceberg")
+        let mut builder = fixture.table.scan();
+        let predicate =
+            Reference::new("a").is_in([Datum::string("Sioux"), Datum::string("Iceberg")]);
+        builder = builder.with_filter(predicate);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches[0].num_rows(), 512);
+
+        let col = batches[0].column_by_name("a").unwrap();
+        let string_arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(string_arr.value(0), "Iceberg");
+    }
+
+    #[tokio::test]
+    async fn test_filter_on_arrow_not_in() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: a NOT IN ("Sioux", "Iceberg")
+        let mut builder = fixture.table.scan();
+        let predicate =
+            Reference::new("a").is_not_in([Datum::string("Sioux"), Datum::string("Iceberg")]);
+        builder = builder.with_filter(predicate);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches[0].num_rows(), 512);
+
+        let col = batches[0].column_by_name("a").unwrap();
+        let string_arr = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(string_arr.value(0), "Apache");
+    }
+
+    #[test]
+    fn test_file_scan_task_serialize_deserialize() {
+        let test_fn = |task: FileScanTask| {
+            let serialized = serde_json::to_string(&task).unwrap();
+            let deserialized: FileScanTask = serde_json::from_str(&serialized).unwrap();
+
+            assert_eq!(task.data_file_path, deserialized.data_file_path);
+            assert_eq!(task.start, deserialized.start);
+            assert_eq!(task.length, deserialized.length);
+            assert_eq!(task.project_field_ids, deserialized.project_field_ids);
+            assert_eq!(task.predicate, deserialized.predicate);
+            assert_eq!(task.schema, deserialized.schema);
+        };
+
+        // without predicate
+        let schema = Arc::new(
+            Schema::builder()
+                .with_fields(vec![Arc::new(NestedField::required(
+                    1,
+                    "x",
+                    Type::Primitive(PrimitiveType::Binary),
+                ))])
+                .build()
+                .unwrap(),
+        );
+        let task = FileScanTask {
+            data_file_path: "data_file_path".to_string(),
+            start: 0,
+            length: 100,
+            project_field_ids: vec![1, 2, 3],
+            predicate: None,
+            schema: schema.clone(),
+        };
+        test_fn(task);
+
+        // with predicate
+        let task = FileScanTask {
+            data_file_path: "data_file_path".to_string(),
+            start: 0,
+            length: 100,
+            project_field_ids: vec![1, 2, 3],
+            predicate: Some(BoundPredicate::AlwaysTrue),
+            schema,
+        };
+        test_fn(task);
     }
 }

@@ -40,7 +40,6 @@ pub use catalog::TableUpdate;
 pub use catalog::ViewCreation;
 pub use catalog::ViewUpdate;
 
-#[allow(dead_code)]
 pub mod table;
 
 mod avro;
@@ -49,10 +48,11 @@ pub mod spec;
 
 pub mod scan;
 
-#[allow(dead_code)]
 pub mod expr;
 pub mod transaction;
 pub mod transform;
+
+mod runtime;
 
 pub mod arrow;
 pub mod writer;

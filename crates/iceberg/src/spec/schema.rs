@@ -317,7 +317,7 @@ impl Schema {
 
     /// Returns [`schema_id`].
     #[inline]
-    pub fn schema_id(&self) -> i32 {
+    pub fn schema_id(&self) -> SchemaId {
         self.schema_id
     }
 
@@ -329,8 +329,8 @@ impl Schema {
 
     /// Returns [`identifier_field_ids`].
     #[inline]
-    pub fn identifier_field_ids(&self) -> &HashSet<i32> {
-        &self.identifier_field_ids
+    pub fn identifier_field_ids(&self) -> impl Iterator<Item = i32> + '_ {
+        self.identifier_field_ids.iter().copied()
     }
 
     /// Get field id by full name.
@@ -1196,7 +1196,7 @@ mod tests {
         (schema, record)
     }
 
-    fn table_schema_nested() -> Schema {
+    pub fn table_schema_nested() -> Schema {
         Schema::builder()
             .with_schema_id(1)
             .with_identifier_field_ids(vec![2])

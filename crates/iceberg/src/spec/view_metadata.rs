@@ -304,7 +304,7 @@ fn is_same_version(a: &ViewVersion, b: &ViewVersion) -> bool {
 }
 
 fn is_same_schema(a: &Schema, b: &Schema) -> bool {
-    a.as_struct() == b.as_struct() && a.identifier_field_ids() == b.identifier_field_ids()
+    a.as_struct() == b.as_struct() && a.identifier_field_ids().collect::<HashSet<_>>() == b.identifier_field_ids().collect::<HashSet<_>>()
 }
 
 /// Manipulating view metadata.
