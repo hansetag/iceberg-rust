@@ -502,7 +502,7 @@ impl ViewMetadataBuilder {
             )?;
         }
 
-        let history_size = dbg!(self
+        let history_size = self
             .metadata
             .properties()
             .get(VERSION_HISTORY_SIZE)
@@ -518,7 +518,7 @@ impl ViewMetadataBuilder {
                 })
             })
             .transpose()?
-            .unwrap_or(VERSION_HISTORY_SIZE_DEFAULT));
+            .unwrap_or(VERSION_HISTORY_SIZE_DEFAULT);
 
         if history_size < 1 {
             return Err(crate::Error::new(

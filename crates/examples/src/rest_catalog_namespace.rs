@@ -24,7 +24,7 @@ async fn main() {
     // ANCHOR: create_catalog
     // Create catalog
     let config = RestCatalogConfig::builder()
-        .uri("http://localhost:8080".to_string())
+        .uri("http://localhost:8080".to_string().parse().unwrap())
         .build();
 
     let catalog = RestCatalog::new(config);

@@ -69,7 +69,7 @@ async fn get_catalog() -> RestCatalog {
     }
 
     let config = RestCatalogConfig::builder()
-        .uri(format!("http://{}:{}", rest_catalog_ip, REST_CATALOG_PORT))
+        .uri(format!("http://{}:{}", rest_catalog_ip, REST_CATALOG_PORT).parse().unwrap())
         .build();
     RestCatalog::new(config)
 }

@@ -20,7 +20,7 @@ use crate::RestCatalogConfig;
 use iceberg::Result;
 use iceberg::{Error, ErrorKind};
 use reqwest::header::HeaderMap;
-use reqwest::{Client, IntoUrl, Method, Request, RequestBuilder, Response};
+use reqwest::{Client, Method, Request, RequestBuilder, Response, Url};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -34,7 +34,7 @@ pub(crate) struct HttpClient {
     /// It's possible to fetch the token from the server while needed.
     token: Mutex<Option<String>>,
     /// The token endpoint to be used for authentication.
-    token_endpoint: String,
+    token_endpoint: Url,
     /// The credential to be used for authentication.
     credential: Option<(Option<String>, String)>,
     /// Extra headers to be added to each request.
@@ -58,7 +58,7 @@ impl HttpClient {
             client: Client::new(),
 
             token: Mutex::new(cfg.token()),
-            token_endpoint: cfg.get_token_endpoint(),
+            token_endpoint: cfg.get_token_endpoint()?,
             credential: cfg.credential(),
             extra_headers: cfg.extra_headers()?,
             extra_oauth_params: cfg.extra_oauth_params(),
@@ -69,7 +69,7 @@ impl HttpClient {
     #[cfg(test)]
     pub(crate) async fn token(&self) -> Option<String> {
         let mut req = self
-            .request(Method::GET, &self.token_endpoint)
+            .request(Method::GET, self.token_endpoint.clone())
             .build()
             .unwrap();
         self.authenticate(&mut req).await.ok();
@@ -130,7 +130,7 @@ impl HttpClient {
 
         let auth_req = self
             .client
-            .request(Method::POST, &self.token_endpoint)
+            .request(Method::POST, self.token_endpoint.clone())
             .form(&params)
             .build()?;
         let auth_resp = self.client.execute(auth_req).await?;
@@ -178,7 +178,7 @@ impl HttpClient {
     }
 
     #[inline]
-    pub fn request<U: IntoUrl>(&self, method: Method, url: U) -> RequestBuilder {
+    pub fn request(&self, method: Method, url: Url) -> RequestBuilder {
         self.client.request(method, url)
     }
 
