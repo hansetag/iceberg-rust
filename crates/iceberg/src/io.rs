@@ -51,14 +51,14 @@
 use bytes::Bytes;
 use std::ops::Range;
 use std::{collections::HashMap, sync::Arc};
-
+use std::str::FromStr;
 use crate::{error::Result, Error, ErrorKind};
 use once_cell::sync::Lazy;
 use opendal::{Operator, Scheme};
 use url::Url;
 
 /// Following are arguments for [s3 file io](https://py.iceberg.apache.org/configuration/#s3).
-/// S3 endopint.
+/// S3 endpoint.
 pub const S3_ENDPOINT: &str = "s3.endpoint";
 /// S3 access key id.
 pub const S3_ACCESS_KEY_ID: &str = "s3.access-key-id";
@@ -77,6 +77,50 @@ static S3_CONFIG_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(
 
     m
 });
+
+/// Module containing azdls related structs.
+pub mod azdls {
+    /// Azdls configuration keys with conversions to [`opendal::Operator`] configuration keys.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumString, strum::Display)]
+    #[strum(serialize_all = "snake_case")]
+    pub enum ConfigKeys {
+        /// Az endpoint to use
+        Endpoint,
+        /// Az client id, used for client credential flow, created in microsoft app registration
+        ClientId,
+        /// Az client secret, used for client credential flow, created in microsoft app registration
+        ClientSecret,
+        /// Az tenant id, required for client credential flow
+        TenantId,
+        /// Az account key, used for shared key authentication
+        AccountKey,
+        /// Az storage account name
+        AccountName,
+        /// Az filesystem to use, also known as container
+        Filesystem,
+        /// TODO: this is overwritten anyways, why keep?
+        Root,
+        /// Az authority host, used for client credential flow
+        AuthorityHost
+    }
+
+    impl ConfigKeys {
+        /// Convert to [`opendal::Operator`] configuration key.
+        pub fn into_opendal_config_key(self) -> &'static str {
+            match self {
+                Self::Endpoint => "endpoint",
+                Self::ClientId => "client_id",
+                Self::ClientSecret => "client_secret",
+                Self::TenantId => "tenant_id",
+                Self::AccountKey => "account_key",
+                Self::AccountName => "account_name",
+                Self::Filesystem => "filesystem",
+                Self::Root => "root",
+                Self::AuthorityHost => "authority_host"
+            }
+        }
+    }
+}
 
 const DEFAULT_ROOT_PATH: &str = "/";
 
@@ -383,6 +427,9 @@ enum Storage {
         scheme_str: String,
         props: HashMap<String, String>,
     },
+    Azdls {
+        props: HashMap<String, String>,
+    },
 }
 
 impl Storage {
@@ -431,6 +478,10 @@ impl Storage {
                     ))
                 }
             }
+            Storage::Azdls { props } => {
+
+                Ok((Operator::via_map(Scheme::Azdls, props.clone())?, &path["azdls://".len()..]))
+            }
         }
     }
 
@@ -439,6 +490,7 @@ impl Storage {
         match scheme {
             "file" | "" => Ok(Scheme::Fs),
             "s3" | "s3a" => Ok(Scheme::S3),
+            "azdls" => Ok(Scheme::Azdls),
             s => Ok(s.parse::<Scheme>()?),
         }
     }
@@ -466,6 +518,23 @@ impl Storage {
                     props: new_props,
                 })
             }
+            Scheme::Azdls => {
+                for prop in file_io_builder.props {
+                    let config_key = azdls::ConfigKeys::from_str(prop.0.as_str()).map_err(|_| {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            format!("Invalid azdls config key: {}", prop.0),
+                        )
+                    })?;
+                    new_props.insert(config_key.into_opendal_config_key().to_string(), prop.1);
+                }
+                // TODO: validate config, i.e. check that all required fields for auth method are
+                // present
+                Ok(Self::Azdls {
+                    props: new_props
+                })
+            }
+
             _ => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 format!("Constructing file io from scheme: {scheme} not supported now",),
