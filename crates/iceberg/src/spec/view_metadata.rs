@@ -29,7 +29,7 @@ use std::sync::Arc;
 use super::view_version::{ViewVersion, ViewVersionId, ViewVersionRef};
 use super::{Schema, SchemaId, SchemaRef, ViewRepresentation};
 use crate::catalog::ViewCreation;
-use crate::error::Result;
+use crate::error::{Result, timestamp_ms_to_utc};
 
 use _serde::ViewMetadataEnum;
 
@@ -636,8 +636,8 @@ impl ViewVersionLog {
     }
 
     /// Returns the last updated timestamp as a DateTime<Utc> with millisecond precision.
-    pub fn timestamp(self) -> MappedLocalTime<DateTime<Utc>> {
-        Utc.timestamp_millis_opt(self.timestamp_ms)
+    pub fn timestamp(self) -> Result<DateTime<Utc>> {
+        timestamp_ms_to_utc(self.timestamp_ms)
     }
 }
 
