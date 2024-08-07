@@ -30,6 +30,8 @@ pub const S3_ENDPOINT: &str = "s3.endpoint";
 pub const S3_ACCESS_KEY_ID: &str = "s3.access-key-id";
 /// S3 secret access key.
 pub const S3_SECRET_ACCESS_KEY: &str = "s3.secret-access-key";
+/// S3 session token, returned by STS for temporary credentials.
+pub const S3_SESSION_TOKEN: &str = "s3.session-token";
 /// S3 region.
 pub const S3_REGION: &str = "s3.region";
 /// S3 Path Style Access.
@@ -43,6 +45,7 @@ pub const S3_SSE_TYPE: &str = "s3.sse.type";
 pub const S3_SSE_KEY: &str = "s3.sse.key";
 /// S3 Server Side Encryption MD5.
 pub const S3_SSE_MD5: &str = "s3.sse.md5";
+
 
 /// Parse iceberg props to s3 config.
 pub(crate) fn s3_config_parse(mut m: HashMap<String, String>) -> Result<S3Config> {
@@ -64,6 +67,10 @@ pub(crate) fn s3_config_parse(mut m: HashMap<String, String>) -> Result<S3Config
             cfg.enable_virtual_host_style = true;
         }
     };
+    if let Some(session_token) = m.remove(S3_SESSION_TOKEN) {
+        cfg.session_token = Some(session_token);
+    };
+
     let s3_sse_key = m.remove(S3_SSE_KEY);
     if let Some(sse_type) = m.remove(S3_SSE_TYPE) {
         match sse_type.to_lowercase().as_str() {
