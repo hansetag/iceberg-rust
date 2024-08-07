@@ -23,24 +23,15 @@
 extern crate derive_builder;
 
 mod error;
-pub use error::Error;
-pub use error::ErrorKind;
-pub use error::Result;
+pub use error::{Error, ErrorKind, Result};
 
 mod catalog;
 
-pub use catalog::Catalog;
-pub use catalog::Namespace;
-pub use catalog::NamespaceIdent;
-pub use catalog::TableCommit;
-pub use catalog::TableCreation;
-pub use catalog::TableIdent;
-pub use catalog::TableRequirement;
-pub use catalog::TableUpdate;
-pub use catalog::ViewCreation;
-pub use catalog::ViewUpdate;
+pub use catalog::{
+    Catalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent, TableRequirement,
+    TableUpdate, ViewCreation, ViewUpdate
+};
 
-#[allow(dead_code)]
 pub mod table;
 
 mod avro;
@@ -49,10 +40,11 @@ pub mod spec;
 
 pub mod scan;
 
-#[allow(dead_code)]
 pub mod expr;
 pub mod transaction;
 pub mod transform;
+
+mod runtime;
 
 pub mod arrow;
 pub mod writer;

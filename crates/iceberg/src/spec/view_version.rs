@@ -17,21 +17,26 @@
 
 /*!
  * View Versions!
-*/
-use crate::error::Result;
-use chrono::{DateTime, TimeZone, Utc};
-use serde::{Deserialize, Serialize};
+ */
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use _serde::ViewVersionV1;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
 
+use super::view_metadata::ViewVersionLog;
 use crate::catalog::NamespaceIdent;
+use crate::error::{timestamp_ms_to_utc, Result};
 use crate::spec::{SchemaId, SchemaRef, ViewMetadata};
 use crate::{Error, ErrorKind};
-use _serde::ViewVersionV1;
 
 /// Reference to [`ViewVersion`].
 pub type ViewVersionRef = Arc<ViewVersion>;
+
+/// Alias for the integer type used for view version ids.
+pub type ViewVersionId = i32;
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, TypedBuilder)]
 #[serde(from = "ViewVersionV1", into = "ViewVersionV1")]
@@ -39,7 +44,7 @@ pub type ViewVersionRef = Arc<ViewVersion>;
 /// A view versions represents the definition of a view at a specific point in time.
 pub struct ViewVersion {
     /// A unique long ID
-    pub version_id: i64,
+    pub version_id: ViewVersionId,
     /// ID of the schema for the view version
     pub schema_id: SchemaId,
     /// Timestamp when the version was created (ms from epoch)
@@ -58,7 +63,7 @@ pub struct ViewVersion {
 impl ViewVersion {
     /// Get the version id of this view version.
     #[inline]
-    pub fn version_id(&self) -> i64 {
+    pub fn version_id(&self) -> ViewVersionId {
         self.version_id
     }
 
@@ -70,8 +75,14 @@ impl ViewVersion {
 
     /// Get the timestamp of when the view version was created
     #[inline]
-    pub fn timestamp(&self) -> DateTime<Utc> {
-        Utc.timestamp_millis_opt(self.timestamp_ms).unwrap()
+    pub fn timestamp(&self) -> Result<DateTime<Utc>> {
+        timestamp_ms_to_utc(self.timestamp_ms)
+    }
+
+    /// Get the timestamp of when the view version was created in milliseconds since epoch
+    #[inline]
+    pub fn timestamp_ms(&self) -> i64 {
+        self.timestamp_ms
     }
 
     /// Get summary of the view version
@@ -111,13 +122,55 @@ impl ViewVersion {
             .cloned();
         r
     }
+
+    /// Retrieve the history log entry for this view version.
+    #[allow(dead_code)]
+    pub(crate) fn log(&self) -> ViewVersionLog {
+        ViewVersionLog::new(self.version_id, self.timestamp_ms)
+    }
 }
 
 /// A list of view representations.
-pub type ViewRepresentations = Vec<ViewRepresentation>;
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Default)]
+pub struct ViewRepresentations(pub(crate) Vec<ViewRepresentation>);
+
+impl ViewRepresentations {
+    /// Create a new list of view representations.
+    pub fn new(representations: Vec<ViewRepresentation>) -> Self {
+        Self(representations)
+    }
+
+    #[inline]
+    /// Get the number of representations
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline]
+    /// Check if there are no representations
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Get an iterator over the representations
+    pub fn iter(&self) -> impl Iterator<Item = &'_ ViewRepresentation> {
+        self.0.iter()
+    }
+}
+
+// Iterator for ViewRepresentations
+impl IntoIterator for ViewRepresentations {
+    type Item = ViewRepresentation;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 
 /// A builder for [`ViewRepresentations`].
-pub struct ViewRepresentationsBuilder(ViewRepresentations);
+pub struct ViewRepresentationsBuilder(Vec<ViewRepresentation>);
 
 impl ViewRepresentationsBuilder {
     /// Create a new builder.
@@ -133,14 +186,14 @@ impl ViewRepresentationsBuilder {
 
     /// Add a SQL representation to the list.
     pub fn add_sql_representation(self, sql: String, dialect: String) -> Self {
-        self.add_representation(ViewRepresentation::SqlViewRepresentation(
+        self.add_representation(ViewRepresentation::Sql(
             SqlViewRepresentation { sql, dialect },
         ))
     }
 
     /// Build the list of representations.
     pub fn build(self) -> ViewRepresentations {
-        self.0
+        ViewRepresentations(self.0)
     }
 }
 
@@ -154,10 +207,11 @@ impl Default for ViewRepresentationsBuilder {
 #[serde(tag = "type")]
 /// View definitions can be represented in multiple ways.
 /// Representations are documented ways to express a view definition.
+// ToDo: Make unique per Dialect
 pub enum ViewRepresentation {
     #[serde(rename = "sql")]
     /// The SQL representation stores the view definition as a SQL SELECT,
-    SqlViewRepresentation(SqlViewRepresentation),
+    Sql(SqlViewRepresentation),
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -175,20 +229,19 @@ pub struct SqlViewRepresentation {
 
 pub(super) mod _serde {
     /// This is a helper module that defines types to help with serialization/deserialization.
-    /// For deserialization the input first gets read into either the [SnapshotV1] or [SnapshotV2] struct
+    /// For deserialization the input first gets read into the [`ViewVersionV1`] struct.
     /// and then converted into the [Snapshot] struct. Serialization works the other way around.
-    /// [SnapshotV1] and [SnapshotV2] are internal struct that are only used for serialization and deserialization.
+    /// [ViewVersionV1] are internal struct that are only used for serialization and deserialization.
     use serde::{Deserialize, Serialize};
 
+    use super::{ViewRepresentation, ViewRepresentations, ViewVersion};
     use crate::catalog::NamespaceIdent;
-
-    use super::{ViewRepresentation, ViewVersion};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "kebab-case")]
     /// Defines the structure of a v1 view version for serialization/deserialization
     pub(crate) struct ViewVersionV1 {
-        pub version_id: i64,
+        pub version_id: i32,
         pub schema_id: i32,
         pub timestamp_ms: i64,
         pub summary: std::collections::HashMap<String, String>,
@@ -205,7 +258,7 @@ pub(super) mod _serde {
                 schema_id: v1.schema_id,
                 timestamp_ms: v1.timestamp_ms,
                 summary: v1.summary,
-                representations: v1.representations,
+                representations: ViewRepresentations(v1.representations),
                 default_catalog: v1.default_catalog,
                 default_namespace: v1.default_namespace,
             }
@@ -219,7 +272,7 @@ pub(super) mod _serde {
                 schema_id: v1.schema_id,
                 timestamp_ms: v1.timestamp_ms,
                 summary: v1.summary,
-                representations: v1.representations,
+                representations: v1.representations.0,
                 default_catalog: v1.default_catalog,
                 default_namespace: v1.default_namespace,
             }
@@ -227,10 +280,18 @@ pub(super) mod _serde {
     }
 }
 
+impl From<SqlViewRepresentation> for ViewRepresentation {
+    fn from(sql: SqlViewRepresentation) -> Self {
+        ViewRepresentation::Sql(sql)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::spec::view_version::{ViewVersion, _serde::ViewVersionV1};
     use chrono::{TimeZone, Utc};
+
+    use crate::spec::ViewRepresentations;
 
     #[test]
     fn view_version() {
@@ -262,7 +323,7 @@ mod tests {
 
         assert_eq!(result.version_id(), 1);
         assert_eq!(
-            result.timestamp(),
+            result.timestamp().unwrap(),
             Utc.timestamp_millis_opt(1573518431292).unwrap()
         );
         assert_eq!(result.schema_id(), 1);
@@ -273,15 +334,16 @@ mod tests {
             map.insert("engineVersion".to_string(), "3.3.2".to_string());
             map
         });
-        assert_eq!(result.representations(), &{
-            vec![super::ViewRepresentation::SqlViewRepresentation(
+        assert_eq!(
+            result.representations().to_owned(),
+            ViewRepresentations(vec![super::ViewRepresentation::Sql(
                 super::SqlViewRepresentation {
                     sql: "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM events\nGROUP BY 2"
                         .to_string(),
                     dialect: "spark".to_string(),
                 },
-            )]
-        });
+            )])
+        );
         assert_eq!(
             result.default_namespace.inner(),
             vec!["default".to_string()]

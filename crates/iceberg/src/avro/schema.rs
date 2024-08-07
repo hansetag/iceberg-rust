@@ -18,11 +18,6 @@
 //! Conversion between iceberg and avro schema.
 use std::collections::BTreeMap;
 
-use crate::spec::{
-    visit_schema, ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, Schema,
-    SchemaVisitor, StructType, Type,
-};
-use crate::{ensure_data_valid, Error, ErrorKind, Result};
 use apache_avro::schema::{
     DecimalSchema, FixedSchema, Name, RecordField as AvroRecordField, RecordFieldOrder,
     RecordSchema, UnionSchema,
@@ -30,6 +25,12 @@ use apache_avro::schema::{
 use apache_avro::Schema as AvroSchema;
 use itertools::{Either, Itertools};
 use serde_json::{Number, Value};
+
+use crate::spec::{
+    visit_schema, ListType, MapType, NestedFieldRef, PrimitiveType, Schema, SchemaVisitor,
+    StructType,
+};
+use crate::{Error, ErrorKind, Result};
 
 const FILED_ID_PROP: &str = "field-id";
 const UUID_BYTES: usize = 16;
@@ -258,10 +259,22 @@ pub(crate) fn avro_fixed_schema(len: usize, logical_type: Option<&str>) -> Resul
 }
 
 pub(crate) fn avro_decimal_schema(precision: usize, scale: usize) -> Result<AvroSchema> {
+    // Avro decimal logical type annotates Avro bytes _or_ fixed types.
+    // https://avro.apache.org/docs/1.11.1/specification/_print/#decimal
+    // Iceberg spec: Stored as _fixed_ using the minimum number of bytes for the given precision.
+    // https://iceberg.apache.org/spec/#avro
     Ok(AvroSchema::Decimal(DecimalSchema {
         precision,
         scale,
-        inner: Box::new(AvroSchema::Bytes),
+        inner: Box::new(AvroSchema::Fixed(FixedSchema {
+            // Name is not restricted by the spec.
+            // Refer to iceberg-python https://github.com/apache/iceberg-python/blob/d8bc1ca9af7957ce4d4db99a52c701ac75db7688/pyiceberg/utils/schema_conversion.py#L574-L582
+            name: Name::new(&format!("decimal_{precision}_{scale}")).unwrap(),
+            aliases: None,
+            doc: None,
+            size: crate::spec::Type::decimal_required_bytes(precision as u32)? as usize,
+            attributes: Default::default(),
+        })),
     }))
 }
 
@@ -272,261 +285,266 @@ fn avro_optional(avro_schema: AvroSchema) -> Result<AvroSchema> {
     ])?))
 }
 
-fn is_avro_optional(avro_schema: &AvroSchema) -> bool {
-    match avro_schema {
-        AvroSchema::Union(union) => union.is_nullable(),
-        _ => false,
+#[cfg(test)]
+mod tests {
+    use std::fs::read_to_string;
+
+    use apache_avro::schema::{Namespace, UnionSchema};
+    use apache_avro::Schema as AvroSchema;
+
+    use super::*;
+    use crate::ensure_data_valid;
+    use crate::spec::{ListType, MapType, NestedField, PrimitiveType, Schema, StructType, Type};
+
+    fn is_avro_optional(avro_schema: &AvroSchema) -> bool {
+        match avro_schema {
+            AvroSchema::Union(union) => union.is_nullable(),
+            _ => false,
+        }
     }
-}
 
-/// Post order avro schema visitor.
-pub(crate) trait AvroSchemaVisitor {
-    type T;
+    /// Post order avro schema visitor.
+    pub(crate) trait AvroSchemaVisitor {
+        type T;
 
-    fn record(&mut self, record: &RecordSchema, fields: Vec<Self::T>) -> Result<Self::T>;
+        fn record(&mut self, record: &RecordSchema, fields: Vec<Self::T>) -> Result<Self::T>;
 
-    fn union(&mut self, union: &UnionSchema, options: Vec<Self::T>) -> Result<Self::T>;
+        fn union(&mut self, union: &UnionSchema, options: Vec<Self::T>) -> Result<Self::T>;
 
-    fn array(&mut self, array: &AvroSchema, item: Self::T) -> Result<Self::T>;
-    fn map(&mut self, map: &AvroSchema, value: Self::T) -> Result<Self::T>;
+        fn array(&mut self, array: &AvroSchema, item: Self::T) -> Result<Self::T>;
+        fn map(&mut self, map: &AvroSchema, value: Self::T) -> Result<Self::T>;
 
-    fn primitive(&mut self, schema: &AvroSchema) -> Result<Self::T>;
-}
-
-/// Visit avro schema in post order visitor.
-pub(crate) fn visit<V: AvroSchemaVisitor>(schema: &AvroSchema, visitor: &mut V) -> Result<V::T> {
-    match schema {
-        AvroSchema::Record(record) => {
-            let field_results = record
-                .fields
-                .iter()
-                .map(|f| visit(&f.schema, visitor))
-                .collect::<Result<Vec<V::T>>>()?;
-
-            visitor.record(record, field_results)
-        }
-        AvroSchema::Union(union) => {
-            let option_results = union
-                .variants()
-                .iter()
-                .map(|f| visit(f, visitor))
-                .collect::<Result<Vec<V::T>>>()?;
-
-            visitor.union(union, option_results)
-        }
-        AvroSchema::Array(item) => {
-            let item_result = visit(item, visitor)?;
-            visitor.array(schema, item_result)
-        }
-        AvroSchema::Map(inner) => {
-            let item_result = visit(inner, visitor)?;
-            visitor.map(schema, item_result)
-        }
-        schema => visitor.primitive(schema),
+        fn primitive(&mut self, schema: &AvroSchema) -> Result<Self::T>;
     }
-}
 
-struct AvroSchemaToSchema {
-    next_id: i32,
-}
-
-impl AvroSchemaToSchema {
-    fn next_field_id(&mut self) -> i32 {
-        self.next_id += 1;
-        self.next_id
+    struct AvroSchemaToSchema {
+        next_id: i32,
     }
-}
 
-impl AvroSchemaVisitor for AvroSchemaToSchema {
-    // Only `AvroSchema::Null` will return `None`
-    type T = Option<Type>;
+    impl AvroSchemaToSchema {
+        fn next_field_id(&mut self) -> i32 {
+            self.next_id += 1;
+            self.next_id
+        }
+    }
 
-    fn record(
-        &mut self,
-        record: &RecordSchema,
-        field_types: Vec<Option<Type>>,
-    ) -> Result<Option<Type>> {
-        let mut fields = Vec::with_capacity(field_types.len());
-        for (avro_field, typ) in record.fields.iter().zip_eq(field_types) {
-            let field_id = avro_field
-                .custom_attributes
-                .get(FILED_ID_PROP)
-                .and_then(Value::as_i64)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Can't convert field, missing field id: {avro_field:?}"),
-                    )
-                })?;
+    impl AvroSchemaVisitor for AvroSchemaToSchema {
+        // Only `AvroSchema::Null` will return `None`
+        type T = Option<Type>;
 
-            let optional = is_avro_optional(&avro_field.schema);
+        fn record(
+            &mut self,
+            record: &RecordSchema,
+            field_types: Vec<Option<Type>>,
+        ) -> Result<Option<Type>> {
+            let mut fields = Vec::with_capacity(field_types.len());
+            for (avro_field, typ) in record.fields.iter().zip_eq(field_types) {
+                let field_id = avro_field
+                    .custom_attributes
+                    .get(FILED_ID_PROP)
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::DataInvalid,
+                            format!("Can't convert field, missing field id: {avro_field:?}"),
+                        )
+                    })?;
 
-            let mut field = if optional {
-                NestedField::optional(field_id as i32, &avro_field.name, typ.unwrap())
-            } else {
-                NestedField::required(field_id as i32, &avro_field.name, typ.unwrap())
-            };
+                let optional = is_avro_optional(&avro_field.schema);
 
-            if let Some(doc) = &avro_field.doc {
-                field = field.with_doc(doc);
+                let mut field = if optional {
+                    NestedField::optional(field_id as i32, &avro_field.name, typ.unwrap())
+                } else {
+                    NestedField::required(field_id as i32, &avro_field.name, typ.unwrap())
+                };
+
+                if let Some(doc) = &avro_field.doc {
+                    field = field.with_doc(doc);
+                }
+
+                fields.push(field.into());
             }
 
-            fields.push(field.into());
+            Ok(Some(Type::Struct(StructType::new(fields))))
         }
 
-        Ok(Some(Type::Struct(StructType::new(fields))))
-    }
-
-    fn union(
-        &mut self,
-        union: &UnionSchema,
-        mut options: Vec<Option<Type>>,
-    ) -> Result<Option<Type>> {
-        ensure_data_valid!(
-            options.len() <= 2 && !options.is_empty(),
-            "Can't convert avro union type {:?} to iceberg.",
-            union
-        );
-
-        if options.len() > 1 {
+        fn union(
+            &mut self,
+            union: &UnionSchema,
+            mut options: Vec<Option<Type>>,
+        ) -> Result<Option<Type>> {
             ensure_data_valid!(
-                options[0].is_none(),
+                options.len() <= 2 && !options.is_empty(),
                 "Can't convert avro union type {:?} to iceberg.",
                 union
             );
-        }
 
-        if options.len() == 1 {
-            Ok(Some(options.remove(0).unwrap()))
-        } else {
-            Ok(Some(options.remove(1).unwrap()))
-        }
-    }
-
-    fn array(&mut self, array: &AvroSchema, item: Option<Type>) -> Result<Self::T> {
-        if let AvroSchema::Array(item_schema) = array {
-            let element_field = NestedField::list_element(
-                self.next_field_id(),
-                item.unwrap(),
-                !is_avro_optional(item_schema),
-            )
-            .into();
-            Ok(Some(Type::List(ListType { element_field })))
-        } else {
-            Err(Error::new(
-                ErrorKind::Unexpected,
-                "Expected avro array schema, but {array}",
-            ))
-        }
-    }
-
-    fn map(&mut self, map: &AvroSchema, value: Option<Type>) -> Result<Option<Type>> {
-        if let AvroSchema::Map(value_schema) = map {
-            // Due to avro rust implementation's limitation, we can't store attributes in map schema,
-            // we will fix it later when it has been resolved.
-            let key_field = NestedField::map_key_element(
-                self.next_field_id(),
-                Type::Primitive(PrimitiveType::String),
-            );
-            let value_field = NestedField::map_value_element(
-                self.next_field_id(),
-                value.unwrap(),
-                !is_avro_optional(value_schema),
-            );
-            Ok(Some(Type::Map(MapType {
-                key_field: key_field.into(),
-                value_field: value_field.into(),
-            })))
-        } else {
-            Err(Error::new(
-                ErrorKind::Unexpected,
-                "Expected avro map schema, but {map}",
-            ))
-        }
-    }
-
-    fn primitive(&mut self, schema: &AvroSchema) -> Result<Option<Type>> {
-        let typ = match schema {
-            AvroSchema::Decimal(decimal) => {
-                Type::decimal(decimal.precision as u32, decimal.scale as u32)?
+            if options.len() > 1 {
+                ensure_data_valid!(
+                    options[0].is_none(),
+                    "Can't convert avro union type {:?} to iceberg.",
+                    union
+                );
             }
-            AvroSchema::Date => Type::Primitive(PrimitiveType::Date),
-            AvroSchema::TimeMicros => Type::Primitive(PrimitiveType::Time),
-            AvroSchema::TimestampMicros => Type::Primitive(PrimitiveType::Timestamp),
-            AvroSchema::Boolean => Type::Primitive(PrimitiveType::Boolean),
-            AvroSchema::Int => Type::Primitive(PrimitiveType::Int),
-            AvroSchema::Long => Type::Primitive(PrimitiveType::Long),
-            AvroSchema::Float => Type::Primitive(PrimitiveType::Float),
-            AvroSchema::Double => Type::Primitive(PrimitiveType::Double),
-            AvroSchema::String | AvroSchema::Enum(_) => Type::Primitive(PrimitiveType::String),
-            AvroSchema::Fixed(fixed) => {
-                if let Some(logical_type) = fixed.attributes.get(LOGICAL_TYPE) {
-                    let logical_type = logical_type.as_str().ok_or_else(|| {
-                        Error::new(
-                            ErrorKind::DataInvalid,
-                            "logicalType in attributes of avro schema is not a string type",
-                        )
-                    })?;
-                    match logical_type {
-                        UUID_LOGICAL_TYPE => Type::Primitive(PrimitiveType::Uuid),
-                        ty => {
-                            return Err(Error::new(
-                                ErrorKind::FeatureUnsupported,
-                                format!(
-                                    "Logical type {ty} is not support in iceberg primitive type.",
-                                ),
-                            ))
-                        }
-                    }
-                } else {
-                    Type::Primitive(PrimitiveType::Fixed(fixed.size as u64))
-                }
+
+            if options.len() == 1 {
+                Ok(Some(options.remove(0).unwrap()))
+            } else {
+                Ok(Some(options.remove(1).unwrap()))
             }
-            AvroSchema::Bytes => Type::Primitive(PrimitiveType::Binary),
-            AvroSchema::Null => return Ok(None),
-            _ => {
-                return Err(Error::new(
+        }
+
+        fn array(&mut self, array: &AvroSchema, item: Option<Type>) -> Result<Self::T> {
+            if let AvroSchema::Array(item_schema) = array {
+                let element_field = NestedField::list_element(
+                    self.next_field_id(),
+                    item.unwrap(),
+                    !is_avro_optional(item_schema),
+                )
+                .into();
+                Ok(Some(Type::List(ListType { element_field })))
+            } else {
+                Err(Error::new(
                     ErrorKind::Unexpected,
-                    "Unable to convert avro {schema} to iceberg primitive type.",
+                    "Expected avro array schema, but {array}",
                 ))
             }
-        };
+        }
 
-        Ok(Some(typ))
+        fn map(&mut self, map: &AvroSchema, value: Option<Type>) -> Result<Option<Type>> {
+            if let AvroSchema::Map(value_schema) = map {
+                // Due to avro rust implementation's limitation, we can't store attributes in map schema,
+                // we will fix it later when it has been resolved.
+                let key_field = NestedField::map_key_element(
+                    self.next_field_id(),
+                    Type::Primitive(PrimitiveType::String),
+                );
+                let value_field = NestedField::map_value_element(
+                    self.next_field_id(),
+                    value.unwrap(),
+                    !is_avro_optional(value_schema),
+                );
+                Ok(Some(Type::Map(MapType {
+                    key_field: key_field.into(),
+                    value_field: value_field.into(),
+                })))
+            } else {
+                Err(Error::new(
+                    ErrorKind::Unexpected,
+                    "Expected avro map schema, but {map}",
+                ))
+            }
+        }
+
+        fn primitive(&mut self, schema: &AvroSchema) -> Result<Option<Type>> {
+            let typ = match schema {
+                AvroSchema::Decimal(decimal) => {
+                    Type::decimal(decimal.precision as u32, decimal.scale as u32)?
+                }
+                AvroSchema::Date => Type::Primitive(PrimitiveType::Date),
+                AvroSchema::TimeMicros => Type::Primitive(PrimitiveType::Time),
+                AvroSchema::TimestampMicros => Type::Primitive(PrimitiveType::Timestamp),
+                AvroSchema::Boolean => Type::Primitive(PrimitiveType::Boolean),
+                AvroSchema::Int => Type::Primitive(PrimitiveType::Int),
+                AvroSchema::Long => Type::Primitive(PrimitiveType::Long),
+                AvroSchema::Float => Type::Primitive(PrimitiveType::Float),
+                AvroSchema::Double => Type::Primitive(PrimitiveType::Double),
+                AvroSchema::String | AvroSchema::Enum(_) => Type::Primitive(PrimitiveType::String),
+                AvroSchema::Fixed(fixed) => {
+                    if let Some(logical_type) = fixed.attributes.get(LOGICAL_TYPE) {
+                        let logical_type = logical_type.as_str().ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::DataInvalid,
+                                "logicalType in attributes of avro schema is not a string type",
+                            )
+                        })?;
+                        match logical_type {
+                            UUID_LOGICAL_TYPE => Type::Primitive(PrimitiveType::Uuid),
+                            ty => {
+                                return Err(Error::new(
+                                    ErrorKind::FeatureUnsupported,
+                                    format!(
+                                    "Logical type {ty} is not support in iceberg primitive type.",
+                                ),
+                                ))
+                            }
+                        }
+                    } else {
+                        Type::Primitive(PrimitiveType::Fixed(fixed.size as u64))
+                    }
+                }
+                AvroSchema::Bytes => Type::Primitive(PrimitiveType::Binary),
+                AvroSchema::Null => return Ok(None),
+                _ => {
+                    return Err(Error::new(
+                        ErrorKind::Unexpected,
+                        "Unable to convert avro {schema} to iceberg primitive type.",
+                    ))
+                }
+            };
+
+            Ok(Some(typ))
+        }
     }
-}
 
-/// Converts avro schema to iceberg schema.
-pub(crate) fn avro_schema_to_schema(avro_schema: &AvroSchema) -> Result<Schema> {
-    if let AvroSchema::Record(_) = avro_schema {
-        let mut converter = AvroSchemaToSchema { next_id: 0 };
-        let typ = visit(avro_schema, &mut converter)?.expect("Iceberg schema should not be none.");
-        if let Type::Struct(s) = typ {
-            Schema::builder()
-                .with_fields(s.fields().iter().cloned())
-                .build()
+    /// Visit avro schema in post order visitor.
+    pub(crate) fn visit<V: AvroSchemaVisitor>(
+        schema: &AvroSchema,
+        visitor: &mut V,
+    ) -> Result<V::T> {
+        match schema {
+            AvroSchema::Record(record) => {
+                let field_results = record
+                    .fields
+                    .iter()
+                    .map(|f| visit(&f.schema, visitor))
+                    .collect::<Result<Vec<V::T>>>()?;
+
+                visitor.record(record, field_results)
+            }
+            AvroSchema::Union(union) => {
+                let option_results = union
+                    .variants()
+                    .iter()
+                    .map(|f| visit(f, visitor))
+                    .collect::<Result<Vec<V::T>>>()?;
+
+                visitor.union(union, option_results)
+            }
+            AvroSchema::Array(item) => {
+                let item_result = visit(item, visitor)?;
+                visitor.array(schema, item_result)
+            }
+            AvroSchema::Map(inner) => {
+                let item_result = visit(inner, visitor)?;
+                visitor.map(schema, item_result)
+            }
+            schema => visitor.primitive(schema),
+        }
+    }
+    /// Converts avro schema to iceberg schema.
+    pub(crate) fn avro_schema_to_schema(avro_schema: &AvroSchema) -> Result<Schema> {
+        if let AvroSchema::Record(_) = avro_schema {
+            let mut converter = AvroSchemaToSchema { next_id: 0 };
+            let typ =
+                visit(avro_schema, &mut converter)?.expect("Iceberg schema should not be none.");
+            if let Type::Struct(s) = typ {
+                Schema::builder()
+                    .with_fields(s.fields().iter().cloned())
+                    .build()
+            } else {
+                Err(Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Expected to convert avro record schema to struct type, but {typ}"),
+                ))
+            }
         } else {
             Err(Error::new(
-                ErrorKind::Unexpected,
-                format!("Expected to convert avro record schema to struct type, but {typ}"),
+                ErrorKind::DataInvalid,
+                "Can't convert non record avro schema to iceberg schema: {avro_schema}",
             ))
         }
-    } else {
-        Err(Error::new(
-            ErrorKind::DataInvalid,
-            "Can't convert non record avro schema to iceberg schema: {avro_schema}",
-        ))
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::avro::schema::AvroSchemaToSchema;
-    use crate::spec::{ListType, MapType, NestedField, PrimitiveType, Schema, StructType, Type};
-    use apache_avro::schema::{Namespace, UnionSchema};
-    use apache_avro::Schema as AvroSchema;
-    use std::fs::read_to_string;
 
     fn read_test_data_file_to_avro_schema(filename: &str) -> AvroSchema {
         let input = read_to_string(format!(

@@ -15,11 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use hive_metastore::{Database, PrincipalType, SerDeInfo, StorageDescriptor};
-use iceberg::{spec::Schema, Error, ErrorKind, Namespace, NamespaceIdent, Result};
+use iceberg::spec::Schema;
+use iceberg::{Error, ErrorKind, Namespace, NamespaceIdent, Result};
 use pilota::{AHashMap, FastStr};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::schema::HiveSchemaBuilder;
@@ -74,11 +76,15 @@ pub(crate) fn convert_to_namespace(database: &Database) -> Result<Namespace> {
         properties.insert(HMS_DB_OWNER.to_string(), owner.to_string());
     };
 
-    if let Some(owner_type) = &database.owner_type {
-        let value = match owner_type {
-            PrincipalType::User => "User",
-            PrincipalType::Group => "Group",
-            PrincipalType::Role => "Role",
+    if let Some(owner_type) = database.owner_type {
+        let value = if owner_type == PrincipalType::USER {
+            "User"
+        } else if owner_type == PrincipalType::GROUP {
+            "Group"
+        } else if owner_type == PrincipalType::ROLE {
+            "Role"
+        } else {
+            unreachable!("Invalid owner type")
         };
 
         properties.insert(HMS_DB_OWNER_TYPE.to_string(), value.to_string());
@@ -117,9 +123,9 @@ pub(crate) fn convert_to_database(
             HMS_DB_OWNER => db.owner_name = Some(v.clone().into()),
             HMS_DB_OWNER_TYPE => {
                 let owner_type = match v.to_lowercase().as_str() {
-                    "user" => PrincipalType::User,
-                    "group" => PrincipalType::Group,
-                    "role" => PrincipalType::Role,
+                    "user" => PrincipalType::USER,
+                    "group" => PrincipalType::GROUP,
+                    "role" => PrincipalType::ROLE,
                     _ => {
                         return Err(Error::new(
                             ErrorKind::DataInvalid,
@@ -144,7 +150,7 @@ pub(crate) fn convert_to_database(
     // https://github.com/apache/iceberg/blob/main/hive-metastore/src/main/java/org/apache/iceberg/hive/HiveHadoopUtil.java#L44
     if db.owner_name.is_none() {
         db.owner_name = Some(HMS_DEFAULT_DB_OWNER.into());
-        db.owner_type = Some(PrincipalType::User);
+        db.owner_type = Some(PrincipalType::USER);
     }
 
     Ok(db)
@@ -332,10 +338,8 @@ fn get_current_time() -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use iceberg::{
-        spec::{NestedField, PrimitiveType, Type},
-        Namespace, NamespaceIdent,
-    };
+    use iceberg::spec::{NestedField, PrimitiveType, Type};
+    use iceberg::{Namespace, NamespaceIdent};
 
     use super::*;
 
@@ -504,7 +508,7 @@ mod tests {
         assert_eq!(db.name, Some(FastStr::from("my_namespace")));
         assert_eq!(db.description, Some(FastStr::from("my_description")));
         assert_eq!(db.owner_name, Some(FastStr::from("apache")));
-        assert_eq!(db.owner_type, Some(PrincipalType::User));
+        assert_eq!(db.owner_type, Some(PrincipalType::USER));
 
         if let Some(params) = db.parameters {
             assert_eq!(params.get("key1"), Some(&FastStr::from("value1")));
@@ -522,7 +526,7 @@ mod tests {
 
         assert_eq!(db.name, Some(FastStr::from("my_namespace")));
         assert_eq!(db.owner_name, Some(FastStr::from(HMS_DEFAULT_DB_OWNER)));
-        assert_eq!(db.owner_type, Some(PrincipalType::User));
+        assert_eq!(db.owner_type, Some(PrincipalType::USER));
 
         Ok(())
     }

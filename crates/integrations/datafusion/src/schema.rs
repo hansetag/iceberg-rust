@@ -15,11 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use datafusion::catalog::schema::SchemaProvider;
+use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DFResult;
-use datafusion::{catalog::schema::SchemaProvider, datasource::TableProvider};
 use futures::future::try_join_all;
 use iceberg::{Catalog, NamespaceIdent, Result};
 
@@ -89,7 +92,7 @@ impl SchemaProvider for IcebergSchemaProvider {
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        self.tables.get(name).is_some()
+        self.tables.contains_key(name)
     }
 
     async fn table(&self, name: &str) -> DFResult<Option<Arc<dyn TableProvider>>> {

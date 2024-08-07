@@ -21,27 +21,28 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
-use std::{collections::HashMap, sync::Arc};
-use uuid::Uuid;
+use std::sync::Arc;
 
-use super::{
-    view_version::{ViewVersion, ViewVersionRef},
-    Schema, SchemaId, SchemaRef, ViewRepresentation,
-};
+
+use super::view_version::{ViewVersion, ViewVersionId, ViewVersionRef};
+use super::{Schema, SchemaId, SchemaRef, ViewRepresentation};
 use crate::catalog::ViewCreation;
 use crate::error::Result;
 
 use _serde::ViewMetadataEnum;
 
 use crate::Error;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, MappedLocalTime, TimeZone, Utc};
 use itertools::{FoldWhile, Itertools};
+use uuid::Uuid;
 use crate::spec::view_properties::{REPLACE_DROP_DIALECT_ALLOWED, REPLACE_DROP_DIALECT_ALLOWED_DEFAULT, VERSION_HISTORY_SIZE, VERSION_HISTORY_SIZE_DEFAULT};
 
 /// Reference to [`ViewMetadata`].
 pub type ViewMetadataRef = Arc<ViewMetadata>;
+
+pub(crate) static INITIAL_VIEW_VERSION_ID: i32 = 1;
 
 #[derive(Debug, PartialEq, Deserialize, Eq, Clone)]
 #[serde(try_from = "ViewMetadataEnum", into = "ViewMetadataEnum")]
@@ -57,9 +58,9 @@ pub struct ViewMetadata {
     /// The view's base location; used to create metadata file locations
     pub location: String,
     /// ID of the current version of the view (version-id)
-    pub current_version_id: i64,
+    pub current_version_id: ViewVersionId,
     /// A list of known versions of the view
-    pub versions: HashMap<i64, ViewVersionRef>,
+    pub versions: HashMap<ViewVersionId, ViewVersionRef>,
     /// A list of version log entries with the timestamp and version-id for every
     /// change to current-version-id
     pub version_log: Vec<ViewVersionLog>,
@@ -92,7 +93,7 @@ impl ViewMetadata {
 
     /// Returns the current version id.
     #[inline]
-    pub fn current_version_id(&self) -> i64 {
+    pub fn current_version_id(&self) -> ViewVersionId {
         self.current_version_id
     }
 
@@ -104,7 +105,7 @@ impl ViewMetadata {
 
     /// Lookup a view version by id.
     #[inline]
-    pub fn version_by_id(&self, version_id: i64) -> Option<&ViewVersionRef> {
+    pub fn version_by_id(&self, version_id: ViewVersionId) -> Option<&ViewVersionRef> {
         self.versions.get(&version_id)
     }
 
@@ -143,7 +144,7 @@ impl ViewMetadata {
     }
 
     /// Append view version to view
-    fn add_version(&mut self, view_version: ViewVersion) -> Result<AddedOrPresent<i64>> {
+    fn add_version(&mut self, view_version: ViewVersion) -> Result<AddedOrPresent<i32>> {
         if self.versions.contains_key(&view_version.version_id()) {
             return Err(crate::Error::new(
                 crate::ErrorKind::DataInvalid,
@@ -177,7 +178,7 @@ impl ViewMetadata {
         Ok(AddedOrPresent::Added(new_version_id))
     }
 
-    fn set_current_version_id(&mut self, current_version_id: i64) -> Result<()> {
+    fn set_current_version_id(&mut self, current_version_id: i32) -> Result<()> {
         if !self.versions.contains_key(&current_version_id) {
             return Err(crate::Error::new(
                 crate::ErrorKind::DataInvalid,
@@ -304,14 +305,14 @@ fn is_same_version(a: &ViewVersion, b: &ViewVersion) -> bool {
 }
 
 fn is_same_schema(a: &Schema, b: &Schema) -> bool {
-    a.as_struct() == b.as_struct() && a.identifier_field_ids() == b.identifier_field_ids()
+    a.as_struct() == b.as_struct() && a.identifier_field_ids().collect::<HashSet<_>>() == b.identifier_field_ids().collect::<HashSet<_>>()
 }
 
 /// Manipulating view metadata.
 pub struct ViewMetadataBuilder {
     previous: ViewVersionRef,
     metadata: ViewMetadata,
-    last_added_version: Option<i64>,
+    last_added_version: Option<ViewVersionId>,
     last_added_schema: Option<i32>,
     added_versions: usize, // TODO: Update tracking needed?
 }
@@ -349,7 +350,7 @@ impl ViewMetadataBuilder {
         }
 
         let (_, maybe_err) = version.as_ref().representations().iter().fold_while((HashSet::new(), None), |(mut dialects, _), r| match r {
-            ViewRepresentation::SqlViewRepresentation(sql) => {
+            ViewRepresentation::Sql(sql) => {
                 if dialects.insert(sql.dialect.as_str()) {
                     FoldWhile::Continue((dialects, None))
                 } else {
@@ -403,7 +404,7 @@ impl ViewMetadataBuilder {
     }
 
     /// Sets the current version id.
-    pub fn set_current_version_id(mut self, current_version_id: i64) -> Result<Self> {
+    pub fn set_current_version_id(mut self, current_version_id: ViewVersionId) -> Result<Self> {
         if current_version_id == -1 {
             if let Some(last_added_version) = self.last_added_version {
                 return self.set_current_version_id(last_added_version);
@@ -429,11 +430,11 @@ impl ViewMetadataBuilder {
             default_namespace,
             summary,
         } = view_creation;
-        let initial_version_id = super::INITIAL_SEQUENCE_NUMBER;
+        let initial_version_id = super::INITIAL_VIEW_VERSION_ID;
         let version = ViewVersion::builder()
             .with_default_catalog(default_catalog)
             .with_default_namespace(default_namespace)
-            .with_representations(representations.into_iter().collect::<Vec<_>>())
+            .with_representations(representations)
             .with_schema_id(schema.schema_id())
             .with_summary(summary)
             .with_timestamp_ms(Utc::now().timestamp_millis())
@@ -571,7 +572,7 @@ fn sql_dialects_for(view_version: &ViewVersion) -> HashSet<String> {
         .representations()
         .iter()
         .map(|repr| match repr {
-            ViewRepresentation::SqlViewRepresentation(sql) => sql.dialect.to_lowercase(),
+            ViewRepresentation::Sql(sql) => sql.dialect.to_lowercase(),
         })
         .collect()
 }
@@ -594,28 +595,49 @@ pub mod view_properties {
     pub const REPLACE_DROP_DIALECT_ALLOWED_DEFAULT: bool = false;
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 /// A log of when each snapshot was made.
 pub struct ViewVersionLog {
     /// ID that current-version-id was set to
-    pub version_id: i64,
+    version_id: ViewVersionId,
     /// Timestamp when the view's current-version-id was updated (ms from epoch)
-    pub timestamp_ms: i64,
+    timestamp_ms: i64,
 }
 
 impl ViewVersionLog {
-    /// Returns the last updated timestamp as a DateTime<Utc> with millisecond precision
-    pub fn timestamp(&self) -> DateTime<Utc> {
-        Utc.timestamp_millis_opt(self.timestamp_ms).unwrap()
+    #[inline]
+    /// Creates a new view version log.
+    pub fn new(version_id: ViewVersionId, timestamp: i64) -> Self {
+        Self {
+            version_id,
+            timestamp_ms: timestamp,
+        }
     }
 
     /// Returns a new ViewVersionLog with the current timestamp
-    pub fn now(version_id: i64) -> Self {
+    pub fn now(version_id: ViewVersionId) -> Self {
         Self {
             version_id,
             timestamp_ms: Utc::now().timestamp_millis(),
         }
+    }
+
+    /// Returns the version id.
+    #[inline]
+    pub fn version_id(&self) -> ViewVersionId {
+        self.version_id
+    }
+
+    /// Returns the timestamp in milliseconds from epoch.
+    #[inline]
+    pub fn timestamp_ms(&self) -> i64 {
+        self.timestamp_ms
+    }
+
+    /// Returns the last updated timestamp as a DateTime<Utc> with millisecond precision.
+    pub fn timestamp(self) -> MappedLocalTime<DateTime<Utc>> {
+        Utc.timestamp_millis_opt(self.timestamp_ms)
     }
 }
 
@@ -629,14 +651,12 @@ pub(super) mod _serde {
     use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
+    use super::{ViewFormatVersion, ViewVersionId, ViewVersionLog};
+    use crate::spec::schema::_serde::SchemaV2;
     use crate::spec::table_metadata::_serde::VersionNumber;
-    use crate::spec::ViewVersion;
-    use crate::{
-        spec::{schema::_serde::SchemaV2, view_version::_serde::ViewVersionV1, ViewMetadata},
-        Error, ErrorKind,
-    };
-
-    use super::{ViewFormatVersion, ViewVersionLog};
+    use crate::spec::view_version::_serde::ViewVersionV1;
+    use crate::spec::{ViewMetadata, ViewVersion};
+    use crate::{Error, ErrorKind};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(untagged)]
@@ -651,7 +671,7 @@ pub(super) mod _serde {
         pub format_version: VersionNumber<1>,
         pub(super) view_uuid: Uuid,
         pub(super) location: String,
-        pub(super) current_version_id: i64,
+        pub(super) current_version_id: ViewVersionId,
         pub(super) versions: Vec<ViewVersionV1>,
         pub(super) version_log: Vec<ViewVersionLog>,
         pub(super) schemas: Vec<SchemaV2>,
@@ -660,9 +680,7 @@ pub(super) mod _serde {
 
     impl Serialize for ViewMetadata {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
+        where S: serde::Serializer {
             // we must do a clone here
             let metadata_enum: ViewMetadataEnum =
                 self.clone().try_into().map_err(serde::ser::Error::custom)?;
@@ -804,22 +822,21 @@ impl Display for ViewFormatVersion {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fs, sync::Arc};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::sync::Arc;
 
     use anyhow::Result;
     use uuid::Uuid;
 
     use pretty_assertions::assert_eq;
 
-    use crate::{
-        spec::{
-            NestedField, PrimitiveType, Schema, Type, ViewMetadata, ViewRepresentation,
-            ViewRepresentationsBuilder, ViewVersion,
-        },
-        NamespaceIdent, ViewCreation,
-    };
-
     use super::{ViewFormatVersion, ViewMetadataBuilder, ViewVersionLog};
+    use crate::spec::{
+        NestedField, PrimitiveType, Schema, SqlViewRepresentation, Type, ViewMetadata,
+        ViewRepresentations, ViewVersion,
+    };
+    use crate::{NamespaceIdent, ViewCreation};
 
     fn check_view_metadata_serde(json: &str, expected_type: ViewMetadata) {
         let desered_type: ViewMetadata = serde_json::from_str(json).unwrap();
@@ -901,13 +918,12 @@ mod tests {
                 ("engineVersion".to_string(), "3.3.2".to_string()),
                 ("engine-name".to_string(), "Spark".to_string()),
             ]))
-            .with_representations(vec![ViewRepresentation::SqlViewRepresentation(
-                crate::spec::SqlViewRepresentation {
-                    sql: "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM events\nGROUP BY 2"
-                        .to_string(),
-                    dialect: "spark".to_string(),
-                },
-            )])
+            .with_representations(ViewRepresentations(vec![SqlViewRepresentation {
+                sql: "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM events\nGROUP BY 2"
+                    .to_string(),
+                dialect: "spark".to_string(),
+            }
+            .into()]))
             .build();
 
         let expected = ViewMetadata {
@@ -944,9 +960,12 @@ mod tests {
 
     #[test]
     fn test_view_builder_from_view_creation() {
-        let representations = ViewRepresentationsBuilder::new()
-            .add_sql_representation("Select 1".to_string(), "spark".to_string())
-            .build();
+        let representations = ViewRepresentations(vec![SqlViewRepresentation {
+            sql: "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM events\nGROUP BY 2"
+                .to_string(),
+            dialect: "spark".to_string(),
+        }
+        .into()]);
         let creation = ViewCreation::builder()
             .location("s3://bucket/warehouse/default.db/event_agg".to_string())
             .name("view".to_string())
@@ -964,18 +983,145 @@ mod tests {
             metadata.location(),
             "s3://bucket/warehouse/default.db/event_agg"
         );
-        assert_eq!(metadata.current_version_id(), 0);
+        assert_eq!(metadata.current_version_id(), 1);
         assert_eq!(metadata.versions().count(), 1);
         assert_eq!(metadata.schemas_iter().count(), 1);
         assert_eq!(metadata.properties().len(), 0);
     }
 
     #[test]
-    fn test_view_builder_from_view_metadata() {
-        let metadata = get_test_view_metadata("ViewMetadataV2Valid.json");
+    fn test_view_metadata_v1_file_valid() {
+        let metadata =
+            fs::read_to_string("testdata/view_metadata/ViewMetadataV1Valid.json").unwrap();
+
+        let schema = Schema::builder()
+            .with_schema_id(1)
+            .with_fields(vec![
+                Arc::new(
+                    NestedField::optional(1, "event_count", Type::Primitive(PrimitiveType::Int))
+                        .with_doc("Count of events"),
+                ),
+                Arc::new(NestedField::optional(
+                    2,
+                    "event_date",
+                    Type::Primitive(PrimitiveType::Date),
+                )),
+            ])
+            .build()
+            .unwrap();
+
+        let version = ViewVersion::builder()
+            .with_version_id(1)
+            .with_timestamp_ms(1573518431292)
+            .with_schema_id(1)
+            .with_default_catalog("prod".to_string().into())
+            .with_default_namespace(NamespaceIdent::from_vec(vec!["default".to_string()]).unwrap())
+            .with_summary(HashMap::from_iter(vec![
+                ("engineVersion".to_string(), "3.3.2".to_string()),
+                ("engine-name".to_string(), "Spark".to_string()),
+            ]))
+            .with_representations(ViewRepresentations(vec![SqlViewRepresentation {
+                sql: "SELECT\n    COUNT(1), CAST(event_ts AS DATE)\nFROM events\nGROUP BY 2"
+                    .to_string(),
+                dialect: "spark".to_string(),
+            }
+            .into()]))
+            .build();
+
+        let expected = ViewMetadata {
+            format_version: ViewFormatVersion::V1,
+            view_uuid: Uuid::parse_str("fa6506c3-7681-40c8-86dc-e36561f83385").unwrap(),
+            location: "s3://bucket/warehouse/default.db/event_agg".to_string(),
+            current_version_id: 1,
+            versions: HashMap::from_iter(vec![(1, Arc::new(version))]),
+            version_log: vec![ViewVersionLog {
+                timestamp_ms: 1573518431292,
+                version_id: 1,
+            }],
+            schemas: HashMap::from_iter(vec![(1, Arc::new(schema))]),
+            properties: HashMap::from_iter(vec![(
+                "comment".to_string(),
+                "Daily event counts".to_string(),
+            )]),
+        };
+
+        check_view_metadata_serde(&metadata, expected);
+    }
+
+    #[test]
+    fn test_view_builder_assign_uuid() {
+        let metadata = get_test_view_metadata("ViewMetadataV1Valid.json");
         let metadata_builder = ViewMetadataBuilder::new(metadata);
         let uuid = Uuid::new_v4();
         let metadata = metadata_builder.assign_uuid(uuid).build().unwrap();
         assert_eq!(metadata.uuid(), uuid);
+    }
+
+    #[test]
+    fn test_view_metadata_v1_unsupported_version() {
+        let metadata =
+            fs::read_to_string("testdata/view_metadata/ViewMetadataUnsupportedVersion.json")
+                .unwrap();
+
+        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+
+        assert_eq!(
+            desered.unwrap_err().to_string(),
+            "data did not match any variant of untagged enum ViewMetadataEnum"
+        )
+    }
+
+    #[test]
+    fn test_view_metadata_v1_version_not_found() {
+        let metadata =
+            fs::read_to_string("testdata/view_metadata/ViewMetadataV1CurrentVersionNotFound.json")
+                .unwrap();
+
+        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+
+        assert_eq!(
+            desered.unwrap_err().to_string(),
+            "DataInvalid => No version exists with the current version id 2."
+        )
+    }
+
+    #[test]
+    fn test_view_metadata_v1_schema_not_found() {
+        let metadata =
+            fs::read_to_string("testdata/view_metadata/ViewMetadataV1SchemaNotFound.json").unwrap();
+
+        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+
+        assert_eq!(
+            desered.unwrap_err().to_string(),
+            "DataInvalid => No schema exists with the schema id 2."
+        )
+    }
+
+    #[test]
+    fn test_view_metadata_v1_missing_schema_for_version() {
+        let metadata =
+            fs::read_to_string("testdata/view_metadata/ViewMetadataV1MissingSchema.json").unwrap();
+
+        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+
+        assert_eq!(
+            desered.unwrap_err().to_string(),
+            "data did not match any variant of untagged enum ViewMetadataEnum"
+        )
+    }
+
+    #[test]
+    fn test_view_metadata_v1_missing_current_version() {
+        let metadata =
+            fs::read_to_string("testdata/view_metadata/ViewMetadataV1MissingCurrentVersion.json")
+                .unwrap();
+
+        let desered: Result<ViewMetadata, serde_json::Error> = serde_json::from_str(&metadata);
+
+        assert_eq!(
+            desered.unwrap_err().to_string(),
+            "data did not match any variant of untagged enum ViewMetadataEnum"
+        )
     }
 }

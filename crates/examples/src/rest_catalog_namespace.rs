@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
+
 use iceberg::{Catalog, NamespaceIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
-use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() {
@@ -27,7 +28,7 @@ async fn main() {
         .uri("http://localhost:8080".to_string())
         .build();
 
-    let catalog = RestCatalog::new(config).await.unwrap();
+    let catalog = RestCatalog::new(config);
     // ANCHOR_END: create_catalog
 
     // ANCHOR: list_all_namespace

@@ -17,20 +17,23 @@
 
 /*!
  * Data Types
-*/
-use crate::ensure_data_valid;
-use crate::error::Result;
-use crate::spec::datatypes::_decimal::{MAX_PRECISION, REQUIRED_LENGTH};
+ */
+use std::collections::HashMap;
+use std::convert::identity;
+use std::fmt;
+use std::ops::Index;
+use std::sync::{Arc, OnceLock};
+
 use ::serde::de::{MapAccess, Visitor};
 use serde::de::{Error, IntoDeserializer};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value as JsonValue;
-use std::convert::identity;
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::{collections::HashMap, fmt, ops::Index};
 
 use super::values::Literal;
+use crate::ensure_data_valid;
+use crate::error::Result;
+use crate::spec::datatypes::_decimal::{MAX_PRECISION, REQUIRED_LENGTH};
+use crate::spec::PrimitiveLiteral;
 
 /// Field name for list type.
 pub(crate) const LIST_FILED_NAME: &str = "element";
@@ -41,38 +44,37 @@ pub(crate) const MAX_DECIMAL_BYTES: u32 = 24;
 pub(crate) const MAX_DECIMAL_PRECISION: u32 = 38;
 
 mod _decimal {
-    use lazy_static::lazy_static;
+    use once_cell::sync::Lazy;
 
     use crate::spec::{MAX_DECIMAL_BYTES, MAX_DECIMAL_PRECISION};
 
-    lazy_static! {
-        // Max precision of bytes, starts from 1
-        pub(super) static ref MAX_PRECISION: [u32; MAX_DECIMAL_BYTES as usize] = {
-            let mut ret: [u32; 24] = [0; 24];
-            for (i, prec) in ret.iter_mut().enumerate() {
-                *prec = 2f64.powi((8 * (i + 1) - 1) as i32).log10().floor() as u32;
-            }
+    // Max precision of bytes, starts from 1
+    pub(super) static MAX_PRECISION: Lazy<[u32; MAX_DECIMAL_BYTES as usize]> = Lazy::new(|| {
+        let mut ret: [u32; 24] = [0; 24];
+        for (i, prec) in ret.iter_mut().enumerate() {
+            *prec = 2f64.powi((8 * (i + 1) - 1) as i32).log10().floor() as u32;
+        }
 
-            ret
-        };
+        ret
+    });
 
-        //  Required bytes of precision, starts from 1
-        pub(super) static ref REQUIRED_LENGTH: [u32; MAX_DECIMAL_PRECISION as usize] = {
-            let mut ret: [u32; MAX_DECIMAL_PRECISION as usize] = [0; MAX_DECIMAL_PRECISION as usize];
+    //  Required bytes of precision, starts from 1
+    pub(super) static REQUIRED_LENGTH: Lazy<[u32; MAX_DECIMAL_PRECISION as usize]> =
+        Lazy::new(|| {
+            let mut ret: [u32; MAX_DECIMAL_PRECISION as usize] =
+                [0; MAX_DECIMAL_PRECISION as usize];
 
             for (i, required_len) in ret.iter_mut().enumerate() {
                 for j in 0..MAX_PRECISION.len() {
-                    if MAX_PRECISION[j] >= ((i+1) as u32) {
-                        *required_len = (j+1) as u32;
+                    if MAX_PRECISION[j] >= ((i + 1) as u32) {
+                        *required_len = (j + 1) as u32;
                         break;
                     }
                 }
             }
 
             ret
-        };
-
-    }
+        });
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -233,11 +235,32 @@ pub enum PrimitiveType {
     Binary,
 }
 
+impl PrimitiveType {
+    /// Check whether literal is compatible with the type.
+    pub fn compatible(&self, literal: &PrimitiveLiteral) -> bool {
+        matches!(
+            (self, literal),
+            (PrimitiveType::Boolean, PrimitiveLiteral::Boolean(_))
+                | (PrimitiveType::Int, PrimitiveLiteral::Int(_))
+                | (PrimitiveType::Long, PrimitiveLiteral::Long(_))
+                | (PrimitiveType::Float, PrimitiveLiteral::Float(_))
+                | (PrimitiveType::Double, PrimitiveLiteral::Double(_))
+                | (PrimitiveType::Decimal { .. }, PrimitiveLiteral::Decimal(_))
+                | (PrimitiveType::Date, PrimitiveLiteral::Date(_))
+                | (PrimitiveType::Time, PrimitiveLiteral::Time(_))
+                | (PrimitiveType::Timestamp, PrimitiveLiteral::Timestamp(_))
+                | (PrimitiveType::Timestamptz, PrimitiveLiteral::Timestamptz(_))
+                | (PrimitiveType::String, PrimitiveLiteral::String(_))
+                | (PrimitiveType::Uuid, PrimitiveLiteral::Uuid(_))
+                | (PrimitiveType::Fixed(_), PrimitiveLiteral::Fixed(_))
+                | (PrimitiveType::Binary, PrimitiveLiteral::Binary(_))
+        )
+    }
+}
+
 impl Serialize for Type {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
+    where S: Serializer {
         let type_serde = _serde::SerdeType::from(self);
         type_serde.serialize(serializer)
     }
@@ -245,9 +268,7 @@ impl Serialize for Type {
 
 impl<'de> Deserialize<'de> for Type {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         let type_serde = _serde::SerdeType::deserialize(deserializer)?;
         Ok(Type::from(type_serde))
     }
@@ -255,9 +276,7 @@ impl<'de> Deserialize<'de> for Type {
 
 impl<'de> Deserialize<'de> for PrimitiveType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
         if s.starts_with("decimal") {
             deserialize_decimal(s.into_deserializer())
@@ -271,9 +290,7 @@ impl<'de> Deserialize<'de> for PrimitiveType {
 
 impl Serialize for PrimitiveType {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
+    where S: Serializer {
         match self {
             PrimitiveType::Decimal { precision, scale } => {
                 serialize_decimal(precision, scale, serializer)
@@ -285,9 +302,7 @@ impl Serialize for PrimitiveType {
 }
 
 fn deserialize_decimal<'de, D>(deserializer: D) -> std::result::Result<PrimitiveType, D::Error>
-where
-    D: Deserializer<'de>,
-{
+where D: Deserializer<'de> {
     let s = String::deserialize(deserializer)?;
     let (precision, scale) = s
         .trim_start_matches(r"decimal(")
@@ -313,9 +328,7 @@ where
 }
 
 fn deserialize_fixed<'de, D>(deserializer: D) -> std::result::Result<PrimitiveType, D::Error>
-where
-    D: Deserializer<'de>,
-{
+where D: Deserializer<'de> {
     let fixed = String::deserialize(deserializer)?
         .trim_start_matches(r"fixed[")
         .trim_end_matches(']')
@@ -328,9 +341,7 @@ where
 }
 
 fn serialize_fixed<S>(value: &u64, serializer: S) -> std::result::Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
+where S: Serializer {
     serializer.serialize_str(&format!("fixed[{value}]"))
 }
 
@@ -372,9 +383,7 @@ pub struct StructType {
 
 impl<'de> Deserialize<'de> for StructType {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "lowercase")]
         enum Field {
@@ -392,9 +401,7 @@ impl<'de> Deserialize<'de> for StructType {
             }
 
             fn visit_map<V>(self, mut map: V) -> std::result::Result<StructType, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
+            where V: MapAccess<'de> {
                 let mut fields = None;
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -667,14 +674,23 @@ pub struct ListType {
     pub element_field: NestedFieldRef,
 }
 
+impl ListType {
+    /// Construct a list type with the given element field.
+    pub fn new(element_field: NestedFieldRef) -> Self {
+        Self { element_field }
+    }
+}
+
 /// Module for type serialization/deserialization.
 pub(super) mod _serde {
+    use std::borrow::Cow;
+
+    use serde_derive::{Deserialize, Serialize};
+
     use crate::spec::datatypes::Type::Map;
     use crate::spec::datatypes::{
         ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, StructType, Type,
     };
-    use serde_derive::{Deserialize, Serialize};
-    use std::borrow::Cow;
 
     /// List type for serialization and deserialization
     #[derive(Serialize, Deserialize)]
@@ -782,14 +798,23 @@ pub struct MapType {
     pub value_field: NestedFieldRef,
 }
 
+impl MapType {
+    /// Construct a map type with the given key and value fields.
+    pub fn new(key_field: NestedFieldRef, value_field: NestedFieldRef) -> Self {
+        Self {
+            key_field,
+            value_field,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
     use uuid::Uuid;
 
-    use crate::spec::values::PrimitiveLiteral;
-
     use super::*;
+    use crate::spec::values::PrimitiveLiteral;
 
     fn check_type_serde(json: &str, expected_type: Type) {
         let desered_type: Type = serde_json::from_str(json).unwrap();
@@ -895,10 +920,10 @@ mod tests {
             Type::Struct(StructType {
                 fields: vec![
                     NestedField::required(1, "id", Type::Primitive(PrimitiveType::Uuid))
-                        .with_initial_default(Literal::Primitive(PrimitiveLiteral::UUID(
+                        .with_initial_default(Literal::Primitive(PrimitiveLiteral::Uuid(
                             Uuid::parse_str("0db3e2a8-9d1d-42b9-aa7b-74ebe558dceb").unwrap(),
                         )))
-                        .with_write_default(Literal::Primitive(PrimitiveLiteral::UUID(
+                        .with_write_default(Literal::Primitive(PrimitiveLiteral::Uuid(
                             Uuid::parse_str("ec5911be-b0a7-458c-8438-c9a3e53cffae").unwrap(),
                         )))
                         .into(),
@@ -964,10 +989,10 @@ mod tests {
 
         let struct_type = Type::Struct(StructType::new(vec![
             NestedField::required(1, "id", Type::Primitive(PrimitiveType::Uuid))
-                .with_initial_default(Literal::Primitive(PrimitiveLiteral::UUID(
+                .with_initial_default(Literal::Primitive(PrimitiveLiteral::Uuid(
                     Uuid::parse_str("0db3e2a8-9d1d-42b9-aa7b-74ebe558dceb").unwrap(),
                 )))
-                .with_write_default(Literal::Primitive(PrimitiveLiteral::UUID(
+                .with_write_default(Literal::Primitive(PrimitiveLiteral::Uuid(
                     Uuid::parse_str("ec5911be-b0a7-458c-8438-c9a3e53cffae").unwrap(),
                 )))
                 .into(),
@@ -1085,5 +1110,49 @@ mod tests {
 
         assert_eq!(5, Type::decimal_required_bytes(10).unwrap());
         assert_eq!(16, Type::decimal_required_bytes(38).unwrap());
+    }
+
+    #[test]
+    fn test_primitive_type_compatitable() {
+        let types = vec![
+            PrimitiveType::Boolean,
+            PrimitiveType::Int,
+            PrimitiveType::Long,
+            PrimitiveType::Float,
+            PrimitiveType::Double,
+            PrimitiveType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            PrimitiveType::Date,
+            PrimitiveType::Time,
+            PrimitiveType::Timestamp,
+            PrimitiveType::Timestamptz,
+            PrimitiveType::String,
+            PrimitiveType::Uuid,
+            PrimitiveType::Fixed(8),
+            PrimitiveType::Binary,
+        ];
+        let literals = vec![
+            PrimitiveLiteral::Boolean(true),
+            PrimitiveLiteral::Int(1),
+            PrimitiveLiteral::Long(1),
+            PrimitiveLiteral::Float(1.0.into()),
+            PrimitiveLiteral::Double(1.0.into()),
+            PrimitiveLiteral::Decimal(1),
+            PrimitiveLiteral::Date(1),
+            PrimitiveLiteral::Time(1),
+            PrimitiveLiteral::Timestamp(1),
+            PrimitiveLiteral::Timestamptz(1),
+            PrimitiveLiteral::String("1".to_string()),
+            PrimitiveLiteral::Uuid(Uuid::new_v4()),
+            PrimitiveLiteral::Fixed(vec![1]),
+            PrimitiveLiteral::Binary(vec![1]),
+        ];
+        for (i, t) in types.iter().enumerate() {
+            for (j, l) in literals.iter().enumerate() {
+                assert_eq!(i == j, t.compatible(l));
+            }
+        }
     }
 }

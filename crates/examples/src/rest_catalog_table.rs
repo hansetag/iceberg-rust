@@ -15,10 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
+
 use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
 use iceberg::{Catalog, TableCreation, TableIdent};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
-use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() {
@@ -27,7 +28,7 @@ async fn main() {
         .uri("http://localhost:8080".to_string())
         .build();
 
-    let catalog = RestCatalog::new(config).await.unwrap();
+    let catalog = RestCatalog::new(config);
 
     // ANCHOR: create_table
     let table_id = TableIdent::from_strs(["default", "t1"]).unwrap();

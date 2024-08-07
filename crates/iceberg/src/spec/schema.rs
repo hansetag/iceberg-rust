@@ -17,6 +17,16 @@
 
 //! This module defines schema in iceberg.
 
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Display, Formatter};
+use std::sync::Arc;
+
+use _serde::SchemaEnum;
+use bimap::BiHashMap;
+use itertools::{zip_eq, Itertools};
+use serde::{Deserialize, Serialize};
+
+use super::NestedField;
 use crate::error::Result;
 use crate::expr::accessor::StructAccessor;
 use crate::spec::datatypes::{
@@ -24,16 +34,6 @@ use crate::spec::datatypes::{
     MAP_KEY_FIELD_NAME, MAP_VALUE_FIELD_NAME,
 };
 use crate::{ensure_data_valid, Error, ErrorKind};
-use bimap::BiHashMap;
-use itertools::{zip_eq, Itertools};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::fmt::{Display, Formatter};
-use std::sync::Arc;
-
-use _serde::SchemaEnum;
-
-use super::NestedField;
 
 /// Type alias for schema id.
 pub type SchemaId = i32;
@@ -317,7 +317,7 @@ impl Schema {
 
     /// Returns [`schema_id`].
     #[inline]
-    pub fn schema_id(&self) -> i32 {
+    pub fn schema_id(&self) -> SchemaId {
         self.schema_id
     }
 
@@ -329,8 +329,8 @@ impl Schema {
 
     /// Returns [`identifier_field_ids`].
     #[inline]
-    pub fn identifier_field_ids(&self) -> &HashSet<i32> {
-        &self.identifier_field_ids
+    pub fn identifier_field_ids(&self) -> impl Iterator<Item = i32> + '_ {
+        self.identifier_field_ids.iter().copied()
     }
 
     /// Get field id by full name.
@@ -949,11 +949,16 @@ pub(super) mod _serde {
     /// For deserialization the input first gets read into either the [SchemaV1] or [SchemaV2] struct
     /// and then converted into the [Schema] struct. Serialization works the other way around.
     /// [SchemaV1] and [SchemaV2] are internal struct that are only used for serialization and deserialization.
-    use serde::{Deserialize, Serialize};
-
-    use crate::{spec::StructType, Error, Result};
+    use serde::Deserialize;
+    /// This is a helper module that defines types to help with serialization/deserialization.
+    /// For deserialization the input first gets read into either the [SchemaV1] or [SchemaV2] struct
+    /// and then converted into the [Schema] struct. Serialization works the other way around.
+    /// [SchemaV1] and [SchemaV2] are internal struct that are only used for serialization and deserialization.
+    use serde::Serialize;
 
     use super::{Schema, DEFAULT_SCHEMA_ID};
+    use crate::spec::StructType;
+    use crate::{Error, Result};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(untagged)]
@@ -1056,6 +1061,9 @@ pub(super) mod _serde {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::DEFAULT_SCHEMA_ID;
     use crate::spec::datatypes::Type::{List, Map, Primitive, Struct};
     use crate::spec::datatypes::{
         ListType, MapType, NestedField, NestedFieldRef, PrimitiveType, StructType, Type,
@@ -1064,9 +1072,6 @@ mod tests {
     use crate::spec::schema::_serde::{SchemaEnum, SchemaV1, SchemaV2};
     use crate::spec::values::Map as MapValue;
     use crate::spec::{prune_columns, Datum, Literal};
-    use std::collections::{HashMap, HashSet};
-
-    use super::DEFAULT_SCHEMA_ID;
 
     fn check_schema_serde(json: &str, expected_type: Schema, _expected_enum: SchemaEnum) {
         let desered_type: Schema = serde_json::from_str(json).unwrap();
@@ -1196,7 +1201,7 @@ mod tests {
         (schema, record)
     }
 
-    fn table_schema_nested() -> Schema {
+    pub fn table_schema_nested() -> Schema {
         Schema::builder()
             .with_schema_id(1)
             .with_identifier_field_ids(vec![2])

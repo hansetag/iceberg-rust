@@ -17,20 +17,19 @@
 
 //! ManifestList for Iceberg.
 
-use std::{collections::HashMap, str::FromStr};
+use std::collections::HashMap;
+use std::str::FromStr;
 
-use crate::io::FileIO;
-use crate::{io::OutputFile, Error, ErrorKind};
-use apache_avro::{from_value, types::Value, Reader, Writer};
+use apache_avro::types::Value;
+use apache_avro::{from_value, Reader, Writer};
 use bytes::Bytes;
 
-use self::{
-    _const_schema::{MANIFEST_LIST_AVRO_SCHEMA_V1, MANIFEST_LIST_AVRO_SCHEMA_V2},
-    _serde::{ManifestFileV1, ManifestFileV2},
-};
-
+use self::_const_schema::{MANIFEST_LIST_AVRO_SCHEMA_V1, MANIFEST_LIST_AVRO_SCHEMA_V2};
+use self::_serde::{ManifestFileV1, ManifestFileV2};
 use super::{Datum, FormatVersion, Manifest, StructType};
 use crate::error::Result;
+use crate::io::{FileIO, OutputFile};
+use crate::{Error, ErrorKind};
 
 /// Placeholder for sequence number. The field with this value must be replaced with the actual sequence number before it write.
 pub const UNASSIGNED_SEQUENCE_NUMBER: i64 = -1;
@@ -78,6 +77,11 @@ impl ManifestList {
     /// Get the entries in the manifest list.
     pub fn entries(&self) -> &[ManifestFile] {
         &self.entries
+    }
+
+    /// Take ownership of the entries in the manifest list, consuming it
+    pub fn consume_entries(self) -> impl IntoIterator<Item = ManifestFile> {
+        Box::new(self.entries.into_iter())
     }
 }
 
@@ -225,9 +229,9 @@ mod _const_schema {
     use apache_avro::Schema as AvroSchema;
     use once_cell::sync::Lazy;
 
-    use crate::{
-        avro::schema_to_avro_schema,
-        spec::{ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, StructType, Type},
+    use crate::avro::schema_to_avro_schema;
+    use crate::spec::{
+        ListType, NestedField, NestedFieldRef, PrimitiveType, Schema, StructType, Type,
     };
 
     static MANIFEST_PATH: Lazy<NestedFieldRef> = {
@@ -674,15 +678,13 @@ pub struct FieldSummary {
 /// and then converted into the [ManifestFile] struct. Serialization works the other way around.
 /// [ManifestFileV1] and [ManifestFileV2] are internal struct that are only used for serialization and deserialization.
 pub(super) mod _serde {
-    use crate::{
-        spec::{Datum, PrimitiveLiteral, PrimitiveType, StructType},
-        Error,
-    };
     pub use serde_bytes::ByteBuf;
     use serde_derive::{Deserialize, Serialize};
 
     use super::ManifestFile;
     use crate::error::Result;
+    use crate::spec::{Datum, PrimitiveType, StructType};
+    use crate::Error;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(transparent)]
@@ -965,8 +967,8 @@ pub(super) mod _serde {
                     .map(|v| FieldSummary {
                         contains_null: v.contains_null,
                         contains_nan: v.contains_nan,
-                        lower_bound: v.lower_bound.map(|v| PrimitiveLiteral::from(v).into()),
-                        upper_bound: v.upper_bound.map(|v| PrimitiveLiteral::from(v).into()),
+                        lower_bound: v.lower_bound.map(|v| v.to_bytes()),
+                        upper_bound: v.upper_bound.map(|v| v.to_bytes()),
                     })
                     .collect(),
             )
@@ -1096,20 +1098,20 @@ pub(super) mod _serde {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+    use std::fs;
+    use std::sync::Arc;
+
     use apache_avro::{Reader, Schema};
-    use std::{collections::HashMap, fs, sync::Arc};
     use tempfile::TempDir;
 
-    use crate::{
-        io::FileIOBuilder,
-        spec::{
-            manifest_list::_serde::ManifestListV1, Datum, FieldSummary, ManifestContentType,
-            ManifestFile, ManifestList, ManifestListWriter, NestedField, PrimitiveType, StructType,
-            Type, UNASSIGNED_SEQUENCE_NUMBER,
-        },
-    };
-
     use super::_serde::ManifestListV2;
+    use crate::io::FileIOBuilder;
+    use crate::spec::manifest_list::_serde::ManifestListV1;
+    use crate::spec::{
+        Datum, FieldSummary, ManifestContentType, ManifestFile, ManifestList, ManifestListWriter,
+        NestedField, PrimitiveType, StructType, Type, UNASSIGNED_SEQUENCE_NUMBER,
+    };
 
     #[tokio::test]
     async fn test_parse_manifest_list_v1() {

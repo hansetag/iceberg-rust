@@ -15,114 +15,17 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! File io implementation.
-//!
-//! # How to build `FileIO`
-//!
-//! We provided a `FileIOBuilder` to build `FileIO` from scratch. For example:
-//! ```rust
-//! use iceberg::io::{FileIOBuilder, S3_REGION};
-//!
-//! let file_io = FileIOBuilder::new("s3")
-//!     .with_prop(S3_REGION, "us-east-1")
-//!     .build()
-//!     .unwrap();
-//! ```
-//!
-//! Or you can pass a path to ask `FileIO` to infer schema for you:
-//! ```rust
-//! use iceberg::io::{FileIO, S3_REGION};
-//! let file_io = FileIO::from_path("s3://bucket/a")
-//!     .unwrap()
-//!     .with_prop(S3_REGION, "us-east-1")
-//!     .build()
-//!     .unwrap();
-//! ```
-//!
-//! # How to use `FileIO`
-//!
-//! Currently `FileIO` provides simple methods for file operations:
-//!
-//! - `delete`: Delete file.
-//! - `is_exist`: Check if file exists.
-//! - `new_input`: Create input file for reading.
-//! - `new_output`: Create output file for writing.
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::Bytes;
-use std::ops::Range;
-use std::{collections::HashMap, sync::Arc};
-use std::str::FromStr;
-use crate::{error::Result, Error, ErrorKind};
-use once_cell::sync::Lazy;
-use opendal::{Operator, Scheme};
+use opendal::Operator;
 use url::Url;
 
-/// Following are arguments for [s3 file io](https://py.iceberg.apache.org/configuration/#s3).
-/// S3 endpoint.
-pub const S3_ENDPOINT: &str = "s3.endpoint";
-/// S3 access key id.
-pub const S3_ACCESS_KEY_ID: &str = "s3.access-key-id";
-/// S3 secret access key.
-pub const S3_SECRET_ACCESS_KEY: &str = "s3.secret-access-key";
-/// S3 region.
-pub const S3_REGION: &str = "s3.region";
+use super::storage::Storage;
+use crate::{Error, ErrorKind, Result};
 
-/// A mapping from iceberg s3 configuration key to [`opendal::Operator`] configuration key.
-static S3_CONFIG_MAPPING: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
-    let mut m = HashMap::with_capacity(4);
-    m.insert(S3_ENDPOINT, "endpoint");
-    m.insert(S3_ACCESS_KEY_ID, "access_key_id");
-    m.insert(S3_SECRET_ACCESS_KEY, "secret_access_key");
-    m.insert(S3_REGION, "region");
-
-    m
-});
-
-/// Module containing azdls related structs.
-pub mod azdls {
-    /// Azdls configuration keys with conversions to [`opendal::Operator`] configuration keys.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumString, strum::Display)]
-    #[strum(serialize_all = "snake_case")]
-    pub enum ConfigKeys {
-        /// Az endpoint to use
-        Endpoint,
-        /// Az client id, used for client credential flow, created in microsoft app registration
-        ClientId,
-        /// Az client secret, used for client credential flow, created in microsoft app registration
-        ClientSecret,
-        /// Az tenant id, required for client credential flow
-        TenantId,
-        /// Az account key, used for shared key authentication
-        AccountKey,
-        /// Az storage account name
-        AccountName,
-        /// Az filesystem to use, also known as container
-        Filesystem,
-        /// TODO: this is overwritten anyways, why keep?
-        Root,
-        /// Az authority host, used for client credential flow
-        AuthorityHost
-    }
-
-    impl ConfigKeys {
-        /// Convert to [`opendal::Operator`] configuration key.
-        pub fn into_opendal_config_key(self) -> &'static str {
-            match self {
-                Self::Endpoint => "endpoint",
-                Self::ClientId => "client_id",
-                Self::ClientSecret => "client_secret",
-                Self::TenantId => "tenant_id",
-                Self::AccountKey => "account_key",
-                Self::AccountName => "account_name",
-                Self::Filesystem => "filesystem",
-                Self::Root => "root",
-                Self::AuthorityHost => "authority_host"
-            }
-        }
-    }
-}
-
-const DEFAULT_ROOT_PATH: &str = "/";
 
 /// FileIO implementation, used to manipulate files in underlying storage.
 ///
@@ -135,59 +38,6 @@ pub struct FileIO {
     inner: Arc<Storage>,
 }
 
-/// Builder for [`FileIO`].
-#[derive(Debug)]
-pub struct FileIOBuilder {
-    /// This is used to infer scheme of operator.
-    ///
-    /// If this is `None`, then [`FileIOBuilder::build`](FileIOBuilder::build) will build a local file io.
-    scheme_str: Option<String>,
-    /// Arguments for operator.
-    props: HashMap<String, String>,
-}
-
-impl FileIOBuilder {
-    /// Creates a new builder with scheme.
-    pub fn new(scheme_str: impl ToString) -> Self {
-        Self {
-            scheme_str: Some(scheme_str.to_string()),
-            props: HashMap::default(),
-        }
-    }
-
-    /// Creates a new builder for local file io.
-    pub fn new_fs_io() -> Self {
-        Self {
-            scheme_str: None,
-            props: HashMap::default(),
-        }
-    }
-
-    /// Add argument for operator.
-    pub fn with_prop(mut self, key: impl ToString, value: impl ToString) -> Self {
-        self.props.insert(key.to_string(), value.to_string());
-        self
-    }
-
-    /// Add argument for operator.
-    pub fn with_props(
-        mut self,
-        args: impl IntoIterator<Item = (impl ToString, impl ToString)>,
-    ) -> Self {
-        self.props
-            .extend(args.into_iter().map(|e| (e.0.to_string(), e.1.to_string())));
-        self
-    }
-
-    /// Builds [`FileIO`].
-    pub fn build(self) -> Result<FileIO> {
-        let storage = Storage::build(self)?;
-        Ok(FileIO {
-            inner: Arc::new(storage),
-        })
-    }
-}
-
 impl FileIO {
     /// Try to infer file io scheme from path.
     ///
@@ -195,7 +45,7 @@ impl FileIO {
     /// If it's not a valid url, will try to detect if it's a file path.
     ///
     /// Otherwise will return parsing error.
-    pub fn from_path(path: impl AsRef<str>) -> Result<FileIOBuilder> {
+    pub fn from_path(path: impl AsRef<str>) -> crate::Result<FileIOBuilder> {
         let url = Url::parse(path.as_ref())
             .map_err(Error::from)
             .or_else(|e| {
@@ -255,6 +105,66 @@ impl FileIO {
     }
 }
 
+/// Builder for [`FileIO`].
+#[derive(Debug)]
+pub struct FileIOBuilder {
+    /// This is used to infer scheme of operator.
+    ///
+    /// If this is `None`, then [`FileIOBuilder::build`](FileIOBuilder::build) will build a local file io.
+    scheme_str: Option<String>,
+    /// Arguments for operator.
+    props: HashMap<String, String>,
+}
+
+impl FileIOBuilder {
+    /// Creates a new builder with scheme.
+    pub fn new(scheme_str: impl ToString) -> Self {
+        Self {
+            scheme_str: Some(scheme_str.to_string()),
+            props: HashMap::default(),
+        }
+    }
+
+    /// Creates a new builder for local file io.
+    pub fn new_fs_io() -> Self {
+        Self {
+            scheme_str: None,
+            props: HashMap::default(),
+        }
+    }
+
+    /// Fetch the scheme string.
+    ///
+    /// The scheme_str will be empty if it's None.
+    pub(crate) fn into_parts(self) -> (String, HashMap<String, String>) {
+        (self.scheme_str.unwrap_or_default(), self.props)
+    }
+
+    /// Add argument for operator.
+    pub fn with_prop(mut self, key: impl ToString, value: impl ToString) -> Self {
+        self.props.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    /// Add argument for operator.
+    pub fn with_props(
+        mut self,
+        args: impl IntoIterator<Item = (impl ToString, impl ToString)>,
+    ) -> Self {
+        self.props
+            .extend(args.into_iter().map(|e| (e.0.to_string(), e.1.to_string())));
+        self
+    }
+
+    /// Builds [`FileIO`].
+    pub fn build(self) -> crate::Result<FileIO> {
+        let storage = Storage::build(self)?;
+        Ok(FileIO {
+            inner: Arc::new(storage),
+        })
+    }
+}
+
 /// The struct the represents the metadata of a file.
 ///
 /// TODO: we can add last modified time, content type, etc. in the future.
@@ -274,12 +184,12 @@ pub trait FileRead: Send + Unpin + 'static {
     /// Read file content with given range.
     ///
     /// TODO: we can support reading non-contiguous bytes in the future.
-    async fn read(&self, range: Range<u64>) -> Result<Bytes>;
+    async fn read(&self, range: Range<u64>) -> crate::Result<Bytes>;
 }
 
 #[async_trait::async_trait]
 impl FileRead for opendal::Reader {
-    async fn read(&self, range: Range<u64>) -> Result<Bytes> {
+    async fn read(&self, range: Range<u64>) -> crate::Result<Bytes> {
         Ok(opendal::Reader::read(self, range).await?.to_bytes())
     }
 }
@@ -301,7 +211,7 @@ impl InputFile {
     }
 
     /// Check if file exists.
-    pub async fn exists(&self) -> Result<bool> {
+    pub async fn exists(&self) -> crate::Result<bool> {
         Ok(self
             .op
             .is_exist(&self.path[self.relative_path_pos..])
@@ -309,7 +219,7 @@ impl InputFile {
     }
 
     /// Fetch and returns metadata of file.
-    pub async fn metadata(&self) -> Result<FileMetadata> {
+    pub async fn metadata(&self) -> crate::Result<FileMetadata> {
         let meta = self.op.stat(&self.path[self.relative_path_pos..]).await?;
 
         Ok(FileMetadata {
@@ -320,7 +230,7 @@ impl InputFile {
     /// Read and returns whole content of file.
     ///
     /// For continues reading, use [`Self::reader`] instead.
-    pub async fn read(&self) -> Result<Bytes> {
+    pub async fn read(&self) -> crate::Result<Bytes> {
         Ok(self
             .op
             .read(&self.path[self.relative_path_pos..])
@@ -331,7 +241,7 @@ impl InputFile {
     /// Creates [`FileRead`] for continues reading.
     ///
     /// For one-time reading, use [`Self::read`] instead.
-    pub async fn reader(&self) -> Result<impl FileRead> {
+    pub async fn reader(&self) -> crate::Result<impl FileRead> {
         Ok(self.op.reader(&self.path[self.relative_path_pos..]).await?)
     }
 }
@@ -347,21 +257,21 @@ pub trait FileWrite: Send + Unpin + 'static {
     /// Write bytes to file.
     ///
     /// TODO: we can support writing non-contiguous bytes in the future.
-    async fn write(&mut self, bs: Bytes) -> Result<()>;
+    async fn write(&mut self, bs: Bytes) -> crate::Result<()>;
 
     /// Close file.
     ///
     /// Calling close on closed file will generate an error.
-    async fn close(&mut self) -> Result<()>;
+    async fn close(&mut self) -> crate::Result<()>;
 }
 
 #[async_trait::async_trait]
 impl FileWrite for opendal::Writer {
-    async fn write(&mut self, bs: Bytes) -> Result<()> {
+    async fn write(&mut self, bs: Bytes) -> crate::Result<()> {
         Ok(opendal::Writer::write(self, bs).await?)
     }
 
-    async fn close(&mut self) -> Result<()> {
+    async fn close(&mut self) -> crate::Result<()> {
         Ok(opendal::Writer::close(self).await?)
     }
 }
@@ -383,7 +293,7 @@ impl OutputFile {
     }
 
     /// Checks if file exists.
-    pub async fn exists(&self) -> Result<bool> {
+    pub async fn exists(&self) -> crate::Result<bool> {
         Ok(self
             .op
             .is_exist(&self.path[self.relative_path_pos..])
@@ -405,7 +315,7 @@ impl OutputFile {
     ///
     /// Calling `write` will overwrite the file if it exists.
     /// For continues writing, use [`Self::writer`].
-    pub async fn write(&self, bs: Bytes) -> Result<()> {
+    pub async fn write(&self, bs: Bytes) -> crate::Result<()> {
         let mut writer = self.writer().await?;
         writer.write(bs).await?;
         writer.close().await
@@ -416,148 +326,21 @@ impl OutputFile {
     /// # Notes
     ///
     /// For one-time writing, use [`Self::write`] instead.
-    pub async fn writer(&self) -> Result<Box<dyn FileWrite>> {
+    pub async fn writer(&self) -> crate::Result<Box<dyn FileWrite>> {
         Ok(Box::new(
             self.op.writer(&self.path[self.relative_path_pos..]).await?,
         ))
     }
 }
 
-// We introduce this because I don't want to handle unsupported `Scheme` in every method.
-#[derive(Debug)]
-enum Storage {
-    LocalFs {
-        op: Operator,
-    },
-    S3 {
-        scheme_str: String,
-        props: HashMap<String, String>,
-    },
-    Azdls {
-        props: HashMap<String, String>,
-    },
-}
-
-impl Storage {
-    /// Creates operator from path.
-    ///
-    /// # Arguments
-    ///
-    /// * path: It should be *absolute* path starting with scheme string used to construct [`FileIO`].
-    ///
-    /// # Returns
-    ///
-    /// The return value consists of two parts:
-    ///
-    /// * An [`opendal::Operator`] instance used to operate on file.
-    /// * Relative path to the root uri of [`opendal::Operator`].
-    ///
-    fn create_operator<'a>(&self, path: &'a impl AsRef<str>) -> Result<(Operator, &'a str)> {
-        let path = path.as_ref();
-        match self {
-            Storage::LocalFs { op } => {
-                if let Some(stripped) = path.strip_prefix("file:/") {
-                    Ok((op.clone(), stripped))
-                } else {
-                    Ok((op.clone(), &path[1..]))
-                }
-            }
-            Storage::S3 { scheme_str, props } => {
-                let mut props = props.clone();
-                let url = Url::parse(path)?;
-                let bucket = url.host_str().ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Invalid s3 url: {}, missing bucket", path),
-                    )
-                })?;
-
-                props.insert("bucket".to_string(), bucket.to_string());
-
-                let prefix = format!("{}://{}/", scheme_str, bucket);
-                if path.starts_with(&prefix) {
-                    Ok((Operator::via_map(Scheme::S3, props)?, &path[prefix.len()..]))
-                } else {
-                    Err(Error::new(
-                        ErrorKind::DataInvalid,
-                        format!("Invalid s3 url: {}, should start with {}", path, prefix),
-                    ))
-                }
-            }
-            Storage::Azdls { props } => {
-
-                Ok((Operator::via_map(Scheme::Azdls, props.clone())?, &path["azdls://".len()..]))
-            }
-        }
-    }
-
-    /// Parse scheme.
-    fn parse_scheme(scheme: &str) -> Result<Scheme> {
-        match scheme {
-            "file" | "" => Ok(Scheme::Fs),
-            "s3" | "s3a" => Ok(Scheme::S3),
-            "azdls" => Ok(Scheme::Azdls),
-            s => Ok(s.parse::<Scheme>()?),
-        }
-    }
-
-    /// Convert iceberg config to opendal config.
-    fn build(file_io_builder: FileIOBuilder) -> Result<Self> {
-        let scheme_str = file_io_builder.scheme_str.unwrap_or("".to_string());
-        let scheme = Self::parse_scheme(&scheme_str)?;
-        let mut new_props = HashMap::default();
-        new_props.insert("root".to_string(), DEFAULT_ROOT_PATH.to_string());
-
-        match scheme {
-            Scheme::Fs => Ok(Self::LocalFs {
-                op: Operator::via_map(Scheme::Fs, new_props)?,
-            }),
-            Scheme::S3 => {
-                for prop in file_io_builder.props {
-                    if let Some(op_key) = S3_CONFIG_MAPPING.get(prop.0.as_str()) {
-                        new_props.insert(op_key.to_string(), prop.1);
-                    }
-                }
-
-                Ok(Self::S3 {
-                    scheme_str,
-                    props: new_props,
-                })
-            }
-            Scheme::Azdls => {
-                for prop in file_io_builder.props {
-                    let config_key = azdls::ConfigKeys::from_str(prop.0.as_str()).map_err(|_| {
-                        Error::new(
-                            ErrorKind::DataInvalid,
-                            format!("Invalid azdls config key: {}", prop.0),
-                        )
-                    })?;
-                    new_props.insert(config_key.into_opendal_config_key().to_string(), prop.1);
-                }
-                // TODO: validate config, i.e. check that all required fields for auth method are
-                // present
-                Ok(Self::Azdls {
-                    props: new_props
-                })
-            }
-
-            _ => Err(Error::new(
-                ErrorKind::FeatureUnsupported,
-                format!("Constructing file io from scheme: {scheme} not supported now",),
-            )),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::Write;
-
-    use std::{fs::File, path::Path};
+    use std::path::Path;
 
     use futures::io::AllowStdIo;
     use futures::AsyncReadExt;
-
     use tempfile::TempDir;
 
     use super::{FileIO, FileIOBuilder};

@@ -17,26 +17,24 @@
 
 //! Catalog API for Apache Iceberg
 
-use crate::spec::{
-    FormatVersion, Schema, Snapshot, SnapshotReference, SortOrder, TableMetadataBuilder,
-    UnboundPartitionSpec, ViewRepresentation, ViewVersion,
-};
-use crate::table::Table;
-use crate::{Error, ErrorKind, Result};
-use async_trait::async_trait;
-use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::mem::take;
 use std::ops::Deref;
+
+use async_trait::async_trait;
+use serde_derive::{Deserialize, Serialize};
 use typed_builder::TypedBuilder;
-use urlencoding::encode;
 use uuid::Uuid;
+
+use crate::spec::{FormatVersion, Schema, Snapshot, SnapshotReference, SortOrder, TableMetadataBuilder, UnboundPartitionSpec, ViewRepresentations, ViewVersion};
+use crate::table::Table;
+use crate::{Error, ErrorKind, Result};
 
 /// The catalog API for Iceberg Rust.
 #[async_trait]
 pub trait Catalog: Debug + Sync + Send {
-    /// List namespaces from table.
+    /// List namespaces inside the catalog.
     async fn list_namespaces(&self, parent: Option<&NamespaceIdent>)
         -> Result<Vec<NamespaceIdent>>;
 
@@ -123,9 +121,9 @@ impl NamespaceIdent {
         Self::from_vec(iter.into_iter().map(|s| s.to_string()).collect())
     }
 
-    /// Returns url encoded format.
-    pub fn encode_in_url(&self) -> String {
-        encode(&self.as_ref().join("\u{1F}")).to_string()
+    /// Returns a string for used in url.
+    pub fn to_url_string(&self) -> String {
+        self.as_ref().join("\u{001f}")
     }
 
     /// Returns inner strings.
@@ -446,7 +444,7 @@ pub struct ViewCreation {
     /// The view's base location; used to create metadata file locations
     pub location: String,
     /// Representations for the view.
-    pub representations: Vec<ViewRepresentation>,
+    pub representations: ViewRepresentations,
     /// The schema of the view.
     pub schema: Schema,
     /// The properties of the view.
@@ -462,6 +460,7 @@ pub struct ViewCreation {
     #[builder(default)]
     pub summary: HashMap<String, String>,
 }
+
 
 /// ViewUpdate represents an update to a view in the catalog.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -521,19 +520,22 @@ pub enum ViewUpdate {
     },
 }
 
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::fmt::Debug;
+
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
+    use uuid::uuid;
+
     use crate::spec::{
         FormatVersion, NestedField, NullOrder, Operation, PrimitiveType, Schema, Snapshot,
         SnapshotReference, SnapshotRetention, SortDirection, SortField, SortOrder, Summary,
         TableMetadataBuilder, Transform, Type, UnboundPartitionField, UnboundPartitionSpec,
     };
     use crate::{NamespaceIdent, TableCreation, TableIdent, TableRequirement, TableUpdate};
-    use serde::de::DeserializeOwned;
-    use serde::Serialize;
-    use std::collections::HashMap;
-    use std::fmt::Debug;
-    use uuid::uuid;
 
     #[test]
     fn test_create_table_id() {

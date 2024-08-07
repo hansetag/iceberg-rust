@@ -17,6 +17,11 @@
 
 //! Integration tests for rest catalog.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::RwLock;
+
+use ctor::{ctor, dtor};
 use iceberg::spec::{FormatVersion, NestedField, PrimitiveType, Schema, Type};
 use iceberg::transaction::Transaction;
 use iceberg::{Catalog, Namespace, NamespaceIdent, TableCreation, TableIdent};
@@ -24,56 +29,55 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogConfig};
 use iceberg_test_utils::docker::DockerCompose;
 use iceberg_test_utils::{normalize_test_name, set_up};
 use port_scanner::scan_port_addr;
-use std::collections::HashMap;
 use tokio::time::sleep;
 
 const REST_CATALOG_PORT: u16 = 8181;
+static DOCKER_COMPOSE_ENV: RwLock<Option<DockerCompose>> = RwLock::new(None);
 
-struct TestFixture {
-    _docker_compose: DockerCompose,
-    rest_catalog: RestCatalog,
-}
-
-async fn set_test_fixture(func: &str) -> TestFixture {
-    set_up();
+#[ctor]
+fn before_all() {
+    let mut guard = DOCKER_COMPOSE_ENV.write().unwrap();
     let docker_compose = DockerCompose::new(
-        normalize_test_name(format!("{}_{func}", module_path!())),
+        normalize_test_name(module_path!()),
         format!("{}/testdata/rest_catalog", env!("CARGO_MANIFEST_DIR")),
     );
-
-    // Start docker compose
     docker_compose.run();
+    guard.replace(docker_compose);
+}
 
-    let rest_catalog_ip = docker_compose.get_container_ip("rest");
+#[dtor]
+fn after_all() {
+    let mut guard = DOCKER_COMPOSE_ENV.write().unwrap();
+    guard.take();
+}
 
-    let read_port = format!("{}:{}", rest_catalog_ip, REST_CATALOG_PORT);
-    loop {
-        if !scan_port_addr(&read_port) {
-            log::info!("Waiting for 1s rest catalog to ready...");
-            sleep(std::time::Duration::from_millis(1000)).await;
-        } else {
-            break;
-        }
+async fn get_catalog() -> RestCatalog {
+    set_up();
+
+    let rest_catalog_ip = {
+        let guard = DOCKER_COMPOSE_ENV.read().unwrap();
+        let docker_compose = guard.as_ref().unwrap();
+        docker_compose.get_container_ip("rest")
+    };
+
+    let rest_socket_addr = SocketAddr::new(rest_catalog_ip, REST_CATALOG_PORT);
+    while !scan_port_addr(rest_socket_addr) {
+        log::info!("Waiting for 1s rest catalog to ready...");
+        sleep(std::time::Duration::from_millis(1000)).await;
     }
 
     let config = RestCatalogConfig::builder()
-        .uri(format!("http://{}:{}", rest_catalog_ip, REST_CATALOG_PORT))
+        .uri(format!("http://{}", rest_socket_addr))
         .build();
-    let rest_catalog = RestCatalog::new(config).await.unwrap();
-
-    TestFixture {
-        _docker_compose: docker_compose,
-        rest_catalog,
-    }
+    RestCatalog::new(config)
 }
 
 #[tokio::test]
 async fn test_get_non_exist_namespace() {
-    let fixture = set_test_fixture("test_get_non_exist_namespace").await;
+    let catalog = get_catalog().await;
 
-    let result = fixture
-        .rest_catalog
-        .get_namespace(&NamespaceIdent::from_strs(["demo"]).unwrap())
+    let result = catalog
+        .get_namespace(&NamespaceIdent::from_strs(["test_get_non_exist_namespace"]).unwrap())
         .await;
 
     assert!(result.is_err());
@@ -85,7 +89,7 @@ async fn test_get_non_exist_namespace() {
 
 #[tokio::test]
 async fn test_get_namespace() {
-    let fixture = set_test_fixture("test_get_namespace").await;
+    let catalog = get_catalog().await;
 
     let ns = Namespace::with_properties(
         NamespaceIdent::from_strs(["apple", "ios"]).unwrap(),
@@ -96,11 +100,10 @@ async fn test_get_namespace() {
     );
 
     // Verify that namespace doesn't exist
-    assert!(fixture.rest_catalog.get_namespace(ns.name()).await.is_err());
+    assert!(catalog.get_namespace(ns.name()).await.is_err());
 
     // Create this namespace
-    let created_ns = fixture
-        .rest_catalog
+    let created_ns = catalog
         .create_namespace(ns.name(), ns.properties().clone())
         .await
         .unwrap();
@@ -109,17 +112,17 @@ async fn test_get_namespace() {
     assert_map_contains(ns.properties(), created_ns.properties());
 
     // Check that this namespace already exists
-    let get_ns = fixture.rest_catalog.get_namespace(ns.name()).await.unwrap();
+    let get_ns = catalog.get_namespace(ns.name()).await.unwrap();
     assert_eq!(ns.name(), get_ns.name());
     assert_map_contains(ns.properties(), created_ns.properties());
 }
 
 #[tokio::test]
 async fn test_list_namespace() {
-    let fixture = set_test_fixture("test_list_namespace").await;
+    let catalog = get_catalog().await;
 
     let ns1 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["apple", "ios"]).unwrap(),
+        NamespaceIdent::from_strs(["test_list_namespace", "ios"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "ray".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -127,7 +130,7 @@ async fn test_list_namespace() {
     );
 
     let ns2 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["apple", "macos"]).unwrap(),
+        NamespaceIdent::from_strs(["test_list_namespace", "macos"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "xuanwo".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -135,42 +138,41 @@ async fn test_list_namespace() {
     );
 
     // Currently this namespace doesn't exist, so it should return error.
-    assert!(fixture
-        .rest_catalog
-        .list_namespaces(Some(&NamespaceIdent::from_strs(["apple"]).unwrap()))
+    assert!(catalog
+        .list_namespaces(Some(
+            &NamespaceIdent::from_strs(["test_list_namespace"]).unwrap()
+        ))
         .await
         .is_err());
 
     // Create namespaces
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns1.name(), ns1.properties().clone())
         .await
         .unwrap();
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns2.name(), ns1.properties().clone())
         .await
         .unwrap();
 
     // List namespace
-    let mut nss = fixture
-        .rest_catalog
-        .list_namespaces(Some(&NamespaceIdent::from_strs(["apple"]).unwrap()))
+    let nss = catalog
+        .list_namespaces(Some(
+            &NamespaceIdent::from_strs(["test_list_namespace"]).unwrap(),
+        ))
         .await
         .unwrap();
-    nss.sort();
 
-    assert_eq!(&nss[0], ns1.name());
-    assert_eq!(&nss[1], ns2.name());
+    assert!(nss.contains(ns1.name()));
+    assert!(nss.contains(ns2.name()));
 }
 
 #[tokio::test]
 async fn test_list_empty_namespace() {
-    let fixture = set_test_fixture("test_list_empty_namespace").await;
+    let catalog = get_catalog().await;
 
     let ns_apple = Namespace::with_properties(
-        NamespaceIdent::from_strs(["apple"]).unwrap(),
+        NamespaceIdent::from_strs(["test_list_empty_namespace", "apple"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "ray".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -178,23 +180,20 @@ async fn test_list_empty_namespace() {
     );
 
     // Currently this namespace doesn't exist, so it should return error.
-    assert!(fixture
-        .rest_catalog
+    assert!(catalog
         .list_namespaces(Some(ns_apple.name()))
         .await
         .is_err());
 
     // Create namespaces
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns_apple.name(), ns_apple.properties().clone())
         .await
         .unwrap();
 
     // List namespace
-    let nss = fixture
-        .rest_catalog
-        .list_namespaces(Some(&NamespaceIdent::from_strs(["apple"]).unwrap()))
+    let nss = catalog
+        .list_namespaces(Some(ns_apple.name()))
         .await
         .unwrap();
     assert!(nss.is_empty());
@@ -202,10 +201,10 @@ async fn test_list_empty_namespace() {
 
 #[tokio::test]
 async fn test_list_root_namespace() {
-    let fixture = set_test_fixture("test_list_root_namespace").await;
+    let catalog = get_catalog().await;
 
     let ns1 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["apple", "ios"]).unwrap(),
+        NamespaceIdent::from_strs(["test_list_root_namespace", "apple", "ios"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "ray".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -213,7 +212,7 @@ async fn test_list_root_namespace() {
     );
 
     let ns2 = Namespace::with_properties(
-        NamespaceIdent::from_strs(["google", "android"]).unwrap(),
+        NamespaceIdent::from_strs(["test_list_root_namespace", "google", "android"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "xuanwo".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -221,38 +220,34 @@ async fn test_list_root_namespace() {
     );
 
     // Currently this namespace doesn't exist, so it should return error.
-    assert!(fixture
-        .rest_catalog
-        .list_namespaces(Some(&NamespaceIdent::from_strs(["apple"]).unwrap()))
+    assert!(catalog
+        .list_namespaces(Some(
+            &NamespaceIdent::from_strs(["test_list_root_namespace"]).unwrap()
+        ))
         .await
         .is_err());
 
     // Create namespaces
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns1.name(), ns1.properties().clone())
         .await
         .unwrap();
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns2.name(), ns1.properties().clone())
         .await
         .unwrap();
 
     // List namespace
-    let mut nss = fixture.rest_catalog.list_namespaces(None).await.unwrap();
-    nss.sort();
-
-    assert_eq!(&nss[0], &NamespaceIdent::from_strs(["apple"]).unwrap());
-    assert_eq!(&nss[1], &NamespaceIdent::from_strs(["google"]).unwrap());
+    let nss = catalog.list_namespaces(None).await.unwrap();
+    assert!(nss.contains(&NamespaceIdent::from_strs(["test_list_root_namespace"]).unwrap()));
 }
 
 #[tokio::test]
 async fn test_create_table() {
-    let fixture = set_test_fixture("test_create_table").await;
+    let catalog = get_catalog().await;
 
     let ns = Namespace::with_properties(
-        NamespaceIdent::from_strs(["apple", "ios"]).unwrap(),
+        NamespaceIdent::from_strs(["test_create_table", "apple", "ios"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "ray".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -260,8 +255,7 @@ async fn test_create_table() {
     );
 
     // Create namespaces
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns.name(), ns.properties().clone())
         .await
         .unwrap();
@@ -282,8 +276,7 @@ async fn test_create_table() {
         .schema(schema.clone())
         .build();
 
-    let table = fixture
-        .rest_catalog
+    let table = catalog
         .create_table(ns.name(), table_creation)
         .await
         .unwrap();
@@ -310,10 +303,10 @@ async fn test_create_table() {
 
 #[tokio::test]
 async fn test_update_table() {
-    let fixture = set_test_fixture("test_update_table").await;
+    let catalog = get_catalog().await;
 
     let ns = Namespace::with_properties(
-        NamespaceIdent::from_strs(["apple", "ios"]).unwrap(),
+        NamespaceIdent::from_strs(["test_update_table", "apple", "ios"]).unwrap(),
         HashMap::from([
             ("owner".to_string(), "ray".to_string()),
             ("community".to_string(), "apache".to_string()),
@@ -321,8 +314,7 @@ async fn test_update_table() {
     );
 
     // Create namespaces
-    fixture
-        .rest_catalog
+    catalog
         .create_namespace(ns.name(), ns.properties().clone())
         .await
         .unwrap();
@@ -344,8 +336,7 @@ async fn test_update_table() {
         .schema(schema.clone())
         .build();
 
-    let table = fixture
-        .rest_catalog
+    let table = catalog
         .create_table(ns.name(), table_creation)
         .await
         .unwrap();
@@ -359,7 +350,7 @@ async fn test_update_table() {
     let table2 = Transaction::new(&table)
         .set_properties(HashMap::from([("prop1".to_string(), "v1".to_string())]))
         .unwrap()
-        .commit(&fixture.rest_catalog)
+        .commit(&catalog)
         .await
         .unwrap();
 
@@ -374,4 +365,40 @@ fn assert_map_contains(map1: &HashMap<String, String>, map2: &HashMap<String, St
         assert!(map2.contains_key(k));
         assert_eq!(map2.get(k).unwrap(), v);
     }
+}
+
+#[tokio::test]
+async fn test_list_empty_multi_level_namespace() {
+    let catalog = get_catalog().await;
+
+    let ns_apple = Namespace::with_properties(
+        NamespaceIdent::from_strs(["test_list_empty_multi_level_namespace", "a_a", "apple"])
+            .unwrap(),
+        HashMap::from([
+            ("owner".to_string(), "ray".to_string()),
+            ("community".to_string(), "apache".to_string()),
+        ]),
+    );
+
+    // Currently this namespace doesn't exist, so it should return error.
+    assert!(catalog
+        .list_namespaces(Some(ns_apple.name()))
+        .await
+        .is_err());
+
+    // Create namespaces
+    catalog
+        .create_namespace(ns_apple.name(), ns_apple.properties().clone())
+        .await
+        .unwrap();
+
+    // List namespace
+    let nss = catalog
+        .list_namespaces(Some(
+            &NamespaceIdent::from_strs(["test_list_empty_multi_level_namespace", "a_a", "apple"])
+                .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(nss.is_empty());
 }

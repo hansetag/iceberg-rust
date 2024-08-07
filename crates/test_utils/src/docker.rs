@@ -15,8 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::cmd::{get_cmd_output, run_command};
+use std::net::IpAddr;
 use std::process::Command;
+
+use crate::cmd::{get_cmd_output, get_cmd_output_result, run_command};
 
 /// A utility to manage the lifecycle of `docker compose`.
 ///
@@ -39,9 +41,35 @@ impl DockerCompose {
         self.project_name.as_str()
     }
 
+    fn get_os_arch() -> String {
+        let mut cmd = Command::new("docker");
+        cmd.arg("info")
+            .arg("--format")
+            .arg("{{.OSType}}/{{.Architecture}}");
+
+        let result = get_cmd_output_result(cmd, "Get os arch".to_string());
+        match result {
+            Ok(value) => value.trim().to_string(),
+            Err(_err) => {
+                // docker/podman do not consistently place OSArch info in the same json path across OS and versions
+                // Below tries an alternative path if the above path fails
+                let mut alt_cmd = Command::new("docker");
+                alt_cmd
+                    .arg("info")
+                    .arg("--format")
+                    .arg("{{.Version.OsArch}}");
+                get_cmd_output(alt_cmd, "Get os arch".to_string())
+                    .trim()
+                    .to_string()
+            }
+        }
+    }
+
     pub fn run(&self) {
         let mut cmd = Command::new("docker");
         cmd.current_dir(&self.docker_compose_dir);
+
+        cmd.env("DOCKER_DEFAULT_PLATFORM", Self::get_os_arch());
 
         cmd.args(vec![
             "compose",
@@ -63,7 +91,7 @@ impl DockerCompose {
         )
     }
 
-    pub fn get_container_ip(&self, service_name: impl AsRef<str>) -> String {
+    pub fn get_container_ip(&self, service_name: impl AsRef<str>) -> IpAddr {
         let container_name = format!("{}-{}-1", self.project_name, service_name.as_ref());
         let mut cmd = Command::new("docker");
         cmd.arg("inspect")
@@ -71,9 +99,16 @@ impl DockerCompose {
             .arg("{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}")
             .arg(&container_name);
 
-        get_cmd_output(cmd, format!("Get container ip of {container_name}"))
+        let ip_result = get_cmd_output(cmd, format!("Get container ip of {container_name}"))
             .trim()
-            .to_string()
+            .parse::<IpAddr>();
+        match ip_result {
+            Ok(ip) => ip,
+            Err(e) => {
+                log::error!("Invalid IP, {e}");
+                panic!("Failed to parse IP for {container_name}")
+            }
+        }
     }
 }
 

@@ -20,10 +20,12 @@
 use std::fmt::{Display, Formatter};
 
 use fnv::FnvHashSet;
+use serde::{Deserialize, Serialize};
 
 use crate::expr::accessor::{StructAccessor, StructAccessorRef};
-use crate::expr::Bind;
-use crate::expr::{BinaryExpression, Predicate, PredicateOperator, SetExpression, UnaryExpression};
+use crate::expr::{
+    BinaryExpression, Bind, Predicate, PredicateOperator, SetExpression, UnaryExpression,
+};
 use crate::spec::{Datum, NestedField, NestedFieldRef, SchemaRef};
 use crate::{Error, ErrorKind};
 
@@ -32,7 +34,7 @@ pub type Term = Reference;
 
 /// A named reference in an unbound expression.
 /// For example, `a` in `a > 10`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Reference {
     name: String,
 }
@@ -55,7 +57,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").less_than(Datum::long(10));
@@ -75,7 +76,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").less_than_or_equal_to(Datum::long(10));
@@ -95,7 +95,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").greater_than(Datum::long(10));
@@ -115,7 +114,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").greater_than_or_equal_to(Datum::long(10));
@@ -135,7 +133,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").equal_to(Datum::long(10));
@@ -151,7 +148,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").not_equal_to(Datum::long(10));
@@ -167,7 +163,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").starts_with(Datum::string("foo"));
@@ -187,7 +182,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     ///
@@ -208,7 +202,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").is_nan();
@@ -224,7 +217,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").is_not_nan();
@@ -240,7 +232,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").is_null();
@@ -256,7 +247,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
     /// let expr = Reference::new("a").is_not_null();
@@ -272,7 +262,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use fnv::FnvHashSet;
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
@@ -294,7 +283,6 @@ impl Reference {
     /// # Example
     ///
     /// ```rust
-    ///
     /// use fnv::FnvHashSet;
     /// use iceberg::expr::Reference;
     /// use iceberg::spec::Datum;
@@ -351,7 +339,7 @@ impl Bind for Reference {
 }
 
 /// A named reference in a bound expression after binding to a schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundReference {
     // This maybe different from [`name`] filed in [`NestedField`] since this contains full path.
     // For example, if the field is `a.b.c`, then `field.name` is `c`, but `original_name` is `a.b.c`.
