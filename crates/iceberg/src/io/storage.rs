@@ -20,7 +20,10 @@ use std::sync::Arc;
 #[cfg(feature = "storage-s3")]
 use opendal::services::S3Config;
 use opendal::{Operator, Scheme};
-
+#[cfg(feature = "storage-azdls")]
+use opendal::services::AzdlsConfig;
+#[cfg(feature = "storage-azdls")]
+use super::storage_azdls;
 use super::FileIOBuilder;
 use crate::{Error, ErrorKind};
 
@@ -37,6 +40,10 @@ pub(crate) enum Storage {
         /// Storing the scheme string here to return the correct path.
         scheme_str: String,
         config: Arc<S3Config>,
+    },
+    #[cfg(feature = "storage-azdls")]
+    Azdls {
+        config: Arc<AzdlsConfig>
     },
 }
 
@@ -56,6 +63,13 @@ impl Storage {
                 scheme_str,
                 config: super::s3_config_parse(props)?.into(),
             }),
+            #[cfg(feature = "storage-azdls")]
+            Scheme::Azdls => {
+
+                Ok(Self::Azdls {
+                    config: storage_azdls::azdls_config_parse(props)?.into(),
+                })
+            }
             _ => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 format!("Constructing file io from scheme: {scheme} not supported now",),
@@ -117,6 +131,10 @@ impl Storage {
                     ))
                 }
             }
+            #[cfg(feature = "storage-azdls")]
+            Storage::Azdls { config } => {
+                Ok((Operator::from_config(config.as_ref().clone())?.finish(), &path["azdls://".len()..]))
+            }
             #[cfg(all(not(feature = "storage-s3"), not(feature = "storage-fs")))]
             _ => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
@@ -131,6 +149,7 @@ impl Storage {
             "memory" => Ok(Scheme::Memory),
             "file" | "" => Ok(Scheme::Fs),
             "s3" | "s3a" => Ok(Scheme::S3),
+            "azdls" => Ok(Scheme::Azdls),
             s => Ok(s.parse::<Scheme>()?),
         }
     }

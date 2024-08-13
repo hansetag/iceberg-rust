@@ -80,5 +80,10 @@ mod storage_s3;
 pub use storage_s3::*;
 #[cfg(feature = "storage-fs")]
 mod storage_fs;
+#[cfg(feature = "storage-azdls")]
+mod storage_azdls;
+#[cfg(feature = "storage-azdls")]
+pub use storage_azdls::ConfigKeys as AzdlsConfigKeys;
+
 #[cfg(feature = "storage-fs")]
 use storage_fs::*;
