@@ -22,7 +22,10 @@ use opendal::services::GcsConfig;
 #[cfg(feature = "storage-s3")]
 use opendal::services::S3Config;
 use opendal::{Operator, Scheme};
-
+#[cfg(feature = "storage-azdls")]
+use opendal::services::AzdlsConfig;
+#[cfg(feature = "storage-azdls")]
+use super::storage_azdls;
 use super::FileIOBuilder;
 use crate::{Error, ErrorKind};
 
@@ -43,6 +46,10 @@ pub(crate) enum Storage {
         /// TODO: allow users to configure this client.
         client: reqwest::Client,
         config: Arc<S3Config>,
+    },
+    #[cfg(feature = "storage-azdls")]
+    Azdls {
+        config: Arc<AzdlsConfig>
     },
     #[cfg(feature = "storage-gcs")]
     Gcs { config: Arc<GcsConfig> },
@@ -69,6 +76,13 @@ impl Storage {
             Scheme::Gcs => Ok(Self::Gcs {
                 config: super::gcs_config_parse(props)?.into(),
             }),
+            #[cfg(feature = "storage-azdls")]
+            Scheme::Azdls => {
+
+                Ok(Self::Azdls {
+                    config: storage_azdls::azdls_config_parse(props)?.into(),
+                })
+            }
             _ => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 format!("Constructing file io from scheme: {scheme} not supported now",),
@@ -147,11 +161,15 @@ impl Storage {
                     ))
                 }
             }
+            #[cfg(feature = "storage-azdls")]
+            Storage::Azdls { config } => {
+                Ok((Operator::from_config(config.as_ref().clone())?.finish(), &path["azdls://".len()..]))
+            }
             #[cfg(all(
                 not(feature = "storage-s3"),
                 not(feature = "storage-fs"),
-                not(feature = "storage-gcs")
-            ))]
+                not(feature = "storage-gcs"),
+                not(feature = "storage-azdls")))]
             _ => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
                 "No storage service has been enabled",
@@ -165,6 +183,7 @@ impl Storage {
             "memory" => Ok(Scheme::Memory),
             "file" | "" => Ok(Scheme::Fs),
             "s3" | "s3a" => Ok(Scheme::S3),
+            "azdls" => Ok(Scheme::Azdls),
             "gs" => Ok(Scheme::Gcs),
             s => Ok(s.parse::<Scheme>()?),
         }
