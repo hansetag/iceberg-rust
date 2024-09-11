@@ -167,7 +167,6 @@ impl IntoIterator for ViewRepresentations {
     }
 }
 
-
 /// A builder for [`ViewRepresentations`].
 pub struct ViewRepresentationsBuilder(Vec<ViewRepresentation>);
 
@@ -185,9 +184,10 @@ impl ViewRepresentationsBuilder {
 
     /// Add a SQL representation to the list.
     pub fn add_sql_representation(self, sql: String, dialect: String) -> Self {
-        self.add_representation(ViewRepresentation::Sql(
-            SqlViewRepresentation { sql, dialect },
-        ))
+        self.add_representation(ViewRepresentation::Sql(SqlViewRepresentation {
+            sql,
+            dialect,
+        }))
     }
 
     /// Build the list of representations.

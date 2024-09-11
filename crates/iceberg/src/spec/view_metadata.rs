@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use _serde::ViewMetadataEnum;
 use chrono::{DateTime, Utc};
+use itertools::{FoldWhile, Itertools};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use uuid::Uuid;
@@ -33,11 +34,11 @@ use super::view_version::{ViewVersion, ViewVersionId, ViewVersionRef};
 use super::{Schema, SchemaId, SchemaRef, ViewRepresentation};
 use crate::catalog::ViewCreation;
 use crate::error::{timestamp_ms_to_utc, Result};
-
+use crate::spec::view_properties::{
+    REPLACE_DROP_DIALECT_ALLOWED, REPLACE_DROP_DIALECT_ALLOWED_DEFAULT, VERSION_HISTORY_SIZE,
+    VERSION_HISTORY_SIZE_DEFAULT,
+};
 use crate::Error;
-use itertools::{FoldWhile, Itertools};
-use crate::spec::view_properties::{REPLACE_DROP_DIALECT_ALLOWED, REPLACE_DROP_DIALECT_ALLOWED_DEFAULT, VERSION_HISTORY_SIZE, VERSION_HISTORY_SIZE_DEFAULT};
-
 
 /// Reference to [`ViewMetadata`].
 pub type ViewMetadataRef = Arc<ViewMetadata>;
@@ -305,7 +306,9 @@ fn is_same_version(a: &ViewVersion, b: &ViewVersion) -> bool {
 }
 
 fn is_same_schema(a: &Schema, b: &Schema) -> bool {
-    a.as_struct() == b.as_struct() && a.identifier_field_ids().collect::<HashSet<_>>() == b.identifier_field_ids().collect::<HashSet<_>>()
+    a.as_struct() == b.as_struct()
+        && a.identifier_field_ids().collect::<HashSet<_>>()
+            == b.identifier_field_ids().collect::<HashSet<_>>()
 }
 
 /// Manipulating view metadata.
@@ -827,9 +830,8 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Result;
-    use uuid::Uuid;
-
     use pretty_assertions::assert_eq;
+    use uuid::Uuid;
 
     use super::{ViewFormatVersion, ViewMetadataBuilder, ViewVersionLog};
     use crate::spec::{

@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+
 use opendal::services::AzdlsConfig;
+
 use crate::{Error, ErrorKind, Result};
 
 /// Azdls configuration keys with conversions to [`opendal::Operator`] configuration keys.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumString, strum::Display)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumString, strum::Display,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum ConfigKeys {
     /// Az endpoint to use
@@ -22,7 +26,7 @@ pub enum ConfigKeys {
     /// Az filesystem to use, also known as container
     Filesystem,
     /// Az authority host, used for client credential flow
-    AuthorityHost
+    AuthorityHost,
 }
 
 pub(crate) fn azdls_config_parse(m: HashMap<String, String>) -> Result<AzdlsConfig> {
@@ -42,7 +46,7 @@ pub(crate) fn azdls_config_parse(m: HashMap<String, String>) -> Result<AzdlsConf
             ConfigKeys::AccountKey => cfg.account_key = Some(v),
             ConfigKeys::AccountName => cfg.account_name = Some(v),
             ConfigKeys::Filesystem => cfg.filesystem = v,
-            ConfigKeys::AuthorityHost => cfg.authority_host = Some(v)
+            ConfigKeys::AuthorityHost => cfg.authority_host = Some(v),
         }
     }
 

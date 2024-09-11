@@ -20,7 +20,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use opendal::Operator;
+use futures::stream::BoxStream;
+use opendal::{Entry, Operator};
 use url::Url;
 
 use super::storage::Storage;
@@ -71,6 +72,41 @@ impl FileIO {
     pub async fn remove_all(&self, path: impl AsRef<str>) -> Result<()> {
         let (op, relative_path) = self.inner.create_operator(&path)?;
         Ok(op.remove_all(relative_path).await?)
+    }
+
+    /// Lists all files in the directory.
+    pub async fn list(&self, path: impl AsRef<str>, recursive: bool) -> Result<Vec<Entry>> {
+        let (op, relative_path) = self.inner.create_operator(&path)?;
+        Ok(op.list_with(relative_path).recursive(recursive).await?)
+    }
+
+    /// Lists all files in the directory with pagination.
+    pub fn list_paginated(
+        &self,
+        path: impl AsRef<str>,
+        recursive: bool,
+        page_size: usize,
+    ) -> BoxStream<Result<Vec<Entry>>> {
+        let path = path.as_ref().to_string();
+        Box::pin(async_stream::try_stream! {
+
+            let (op, relative_path) = self.inner.create_operator(&path)?;
+
+            let mut next_future = op.list_with(relative_path).recursive(recursive).limit(page_size);
+
+            loop {
+                let entries = next_future.await?;
+
+                let last_path = entries.last().map(|e| e.path().to_string());
+                yield entries;
+
+                if let Some(last) = last_path {
+                    next_future = op.list_with(relative_path).recursive(recursive).start_after(&last).limit(page_size);
+                } else {
+                    break
+                }
+            }
+        })
     }
 
     /// Check file exists.

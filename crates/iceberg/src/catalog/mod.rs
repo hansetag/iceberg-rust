@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::spec::{
     FormatVersion, Schema, Snapshot, SnapshotReference, SortOrder, TableMetadataBuilder,
-    UnboundPartitionSpec, ViewRepresentations, ViewVersion
+    UnboundPartitionSpec, ViewRepresentations, ViewVersion,
 };
 use crate::table::Table;
 use crate::{Error, ErrorKind, Result};
