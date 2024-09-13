@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use opendal::{Entry, Operator};
 use url::Url;
 
@@ -81,32 +82,27 @@ impl FileIO {
     }
 
     /// Lists all files in the directory with pagination.
-    pub fn list_paginated(
+    pub async fn list_paginated(
         &self,
         path: impl AsRef<str>,
         recursive: bool,
         page_size: usize,
-    ) -> BoxStream<Result<Vec<Entry>>> {
+    ) -> Result<BoxStream<Result<Vec<Entry>>>> {
         let path = path.as_ref().to_string();
-        Box::pin(async_stream::try_stream! {
-
-            let (op, relative_path) = self.inner.create_operator(&path)?;
-
-            let mut next_future = op.list_with(relative_path).recursive(recursive).limit(page_size);
-
-            loop {
-                let entries = next_future.await?;
-
-                let last_path = entries.last().map(|e| e.path().to_string());
-                yield entries;
-
-                if let Some(last) = last_path {
-                    next_future = op.list_with(relative_path).recursive(recursive).start_after(&last).limit(page_size);
-                } else {
-                    break
-                }
-            }
-        })
+        let (op, relative_path) = self.inner.create_operator(&path)?;
+        let lister = op
+            .lister_with(relative_path)
+            .recursive(recursive)
+            .limit(page_size)
+            .await?;
+        Ok(lister
+            .chunks(page_size)
+            .map(|i| {
+                i.into_iter()
+                    .map(|i| i.map_err(crate::Error::from))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .boxed())
     }
 
     /// Check file exists.
