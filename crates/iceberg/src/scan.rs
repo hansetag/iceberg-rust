@@ -36,8 +36,8 @@ use crate::io::object_cache::ObjectCache;
 use crate::io::FileIO;
 use crate::runtime::spawn;
 use crate::spec::{
-    DataContentType, ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, Schema,
-    SchemaRef, SnapshotRef, TableMetadataRef,
+    DataContentType, DataFileFormat, ManifestContentType, ManifestEntryRef, ManifestFile,
+    ManifestList, Schema, SchemaRef, SnapshotRef, TableMetadataRef,
 };
 use crate::table::Table;
 use crate::utils::available_parallelism;
@@ -60,6 +60,8 @@ pub struct TableScanBuilder<'a> {
     concurrency_limit_data_files: usize,
     concurrency_limit_manifest_entries: usize,
     concurrency_limit_manifest_files: usize,
+    row_group_filtering_enabled: bool,
+    row_selection_enabled: bool,
 }
 
 impl<'a> TableScanBuilder<'a> {
@@ -76,6 +78,8 @@ impl<'a> TableScanBuilder<'a> {
             concurrency_limit_data_files: num_cpus,
             concurrency_limit_manifest_entries: num_cpus,
             concurrency_limit_manifest_files: num_cpus,
+            row_group_filtering_enabled: true,
+            row_selection_enabled: false,
         }
     }
 
@@ -142,9 +146,35 @@ impl<'a> TableScanBuilder<'a> {
         self
     }
 
-    /// Sets the manifest file concurrency limit for this scan
-    pub fn with_manifest_file_concurrency_limit(mut self, limit: usize) -> Self {
-        self.concurrency_limit_manifest_files = limit;
+    /// Determines whether to enable row group filtering.
+    /// When enabled, if a read is performed with a filter predicate,
+    /// then the metadata for each row group in the parquet file is
+    /// evaluated against the filter predicate and row groups
+    /// that cant contain matching rows will be skipped entirely.
+    ///
+    /// Defaults to enabled, as it generally improves performance or
+    /// keeps it the same, with performance degradation unlikely.
+    pub fn with_row_group_filtering_enabled(mut self, row_group_filtering_enabled: bool) -> Self {
+        self.row_group_filtering_enabled = row_group_filtering_enabled;
+        self
+    }
+
+    /// Determines whether to enable row selection.
+    /// When enabled, if a read is performed with a filter predicate,
+    /// then (for row groups that have not been skipped) the page index
+    /// for each row group in a parquet file is parsed and evaluated
+    /// against the filter predicate to determine if ranges of rows
+    /// within a row group can be skipped, based upon the page-level
+    /// statistics for each column.
+    ///
+    /// Defaults to being disabled. Enabling requires parsing the parquet page
+    /// index, which can be slow enough that parsing the page index outweighs any
+    /// gains from the reduced number of rows that need scanning.
+    /// It is recommended to experiment with partitioning, sorting, row group size,
+    /// page size, and page row limit Iceberg settings on the table being scanned in
+    /// order to get the best performance from using row selection.
+    pub fn with_row_selection_enabled(mut self, row_selection_enabled: bool) -> Self {
+        self.row_selection_enabled = row_selection_enabled;
         self
     }
 
@@ -167,10 +197,7 @@ impl<'a> TableScanBuilder<'a> {
                 .metadata()
                 .current_snapshot()
                 .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::FeatureUnsupported,
-                        "Can't scan table without snapshots",
-                    )
+                    Error::new(ErrorKind::Unexpected, "Can't scan table without snapshots")
                 })?
                 .clone(),
         };
@@ -258,6 +285,8 @@ impl<'a> TableScanBuilder<'a> {
             concurrency_limit_data_files: self.concurrency_limit_data_files,
             concurrency_limit_manifest_entries: self.concurrency_limit_manifest_entries,
             concurrency_limit_manifest_files: self.concurrency_limit_manifest_files,
+            row_group_filtering_enabled: self.row_group_filtering_enabled,
+            row_selection_enabled: self.row_selection_enabled,
         })
     }
 }
@@ -280,6 +309,9 @@ pub struct TableScan {
     /// The maximum number of [`ManifestEntry`]s that will
     /// be processed in parallel
     concurrency_limit_data_files: usize,
+
+    row_group_filtering_enabled: bool,
+    row_selection_enabled: bool,
 }
 
 /// PlanContext wraps a [`SnapshotRef`] alongside all the other
@@ -346,7 +378,7 @@ impl TableScan {
                 .try_for_each_concurrent(
                     concurrency_limit_manifest_entries,
                     |(manifest_entry_context, tx)| async move {
-                        crate::runtime::spawn(async move {
+                        spawn(async move {
                             Self::process_manifest_entry(manifest_entry_context, tx).await
                         })
                         .await
@@ -365,7 +397,9 @@ impl TableScan {
     /// Returns an [`ArrowRecordBatchStream`].
     pub async fn to_arrow(&self) -> Result<ArrowRecordBatchStream> {
         let mut arrow_reader_builder = ArrowReaderBuilder::new(self.file_io.clone())
-            .with_data_file_concurrency_limit(self.concurrency_limit_data_files);
+            .with_data_file_concurrency_limit(self.concurrency_limit_data_files)
+            .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
+            .with_row_selection_enabled(self.row_selection_enabled);
 
         if let Some(batch_size) = self.batch_size {
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
@@ -516,14 +550,19 @@ impl ManifestEntryContext {
     /// created from it
     fn into_file_scan_task(self) -> FileScanTask {
         FileScanTask {
-            data_file_path: self.manifest_entry.file_path().to_string(),
             start: 0,
             length: self.manifest_entry.file_size_in_bytes(),
+            record_count: Some(self.manifest_entry.record_count()),
+
+            data_file_path: self.manifest_entry.file_path().to_string(),
+            data_file_content: self.manifest_entry.content_type(),
+            data_file_format: self.manifest_entry.file_format(),
+
+            schema: self.snapshot_schema,
             project_field_ids: self.field_ids.to_vec(),
             predicate: self
                 .bound_predicates
                 .map(|x| x.as_ref().snapshot_bound_predicate.clone()),
-            schema: self.snapshot_schema,
         }
     }
 }
@@ -841,35 +880,30 @@ impl ExpressionEvaluatorCache {
 /// A task to scan part of file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileScanTask {
-    data_file_path: String,
-    start: u64,
-    length: u64,
-    project_field_ids: Vec<i32>,
+    /// The start offset of the file to scan.
+    pub start: u64,
+    /// The length of the file to scan.
+    pub length: u64,
+    /// The number of records in the file to scan.
+    ///
+    /// This is an optional field, and only available if we are
+    /// reading the entire data file.
+    pub record_count: Option<u64>,
+
+    /// The data file path corresponding to the task.
+    pub data_file_path: String,
+    /// The content type of the file to scan.
+    pub data_file_content: DataContentType,
+    /// The format of the file to scan.
+    pub data_file_format: DataFileFormat,
+
+    /// The schema of the file to scan.
+    pub schema: SchemaRef,
+    /// The field ids to project.
+    pub project_field_ids: Vec<i32>,
+    /// The predicate to filter.
     #[serde(skip_serializing_if = "Option::is_none")]
-    predicate: Option<BoundPredicate>,
-    schema: SchemaRef,
-}
-
-impl FileScanTask {
-    /// Returns the data file path of this file scan task.
-    pub fn data_file_path(&self) -> &str {
-        &self.data_file_path
-    }
-
-    /// Returns the project field id of this file scan task.
-    pub fn project_field_ids(&self) -> &[i32] {
-        &self.project_field_ids
-    }
-
-    /// Returns the predicate of this file scan task.
-    pub fn predicate(&self) -> Option<&BoundPredicate> {
-        self.predicate.as_ref()
-    }
-
-    /// Returns the schema id of this file scan task.
-    pub fn schema(&self) -> &Schema {
-        &self.schema
-    }
+    pub predicate: Option<BoundPredicate>,
 }
 
 #[cfg(test)]
@@ -879,7 +913,9 @@ mod tests {
     use std::fs::File;
     use std::sync::Arc;
 
-    use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+    use arrow_array::{
+        ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    };
     use futures::{stream, TryStreamExt};
     use parquet::arrow::{ArrowWriter, PARQUET_FIELD_ID_META_KEY};
     use parquet::basic::Compression;
@@ -966,7 +1002,7 @@ mod tests {
                 .parent_snapshot(self.table.metadata())
                 .unwrap();
             let current_schema = current_snapshot.schema(self.table.metadata()).unwrap();
-            let current_partition_spec = self.table.metadata().default_partition_spec().unwrap();
+            let current_partition_spec = self.table.metadata().default_partition_spec();
 
             // Write data files
             let data_file_manifest = ManifestWriter::new(
@@ -1076,10 +1112,29 @@ mod tests {
                             PARQUET_FIELD_ID_META_KEY.to_string(),
                             "4".to_string(),
                         )])),
+                    arrow_schema::Field::new("dbl", arrow_schema::DataType::Float64, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "5".to_string(),
+                        )])),
+                    arrow_schema::Field::new("i32", arrow_schema::DataType::Int32, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "6".to_string(),
+                        )])),
+                    arrow_schema::Field::new("i64", arrow_schema::DataType::Int64, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "7".to_string(),
+                        )])),
+                    arrow_schema::Field::new("bool", arrow_schema::DataType::Boolean, false)
+                        .with_metadata(HashMap::from([(
+                            PARQUET_FIELD_ID_META_KEY.to_string(),
+                            "8".to_string(),
+                        )])),
                 ];
                 Arc::new(arrow_schema::Schema::new(fields))
             };
-            // 4 columns:
             // x: [1, 1, 1, 1, ...]
             let col1 = Arc::new(Int64Array::from_iter_values(vec![1; 1024])) as ArrayRef;
 
@@ -1102,8 +1157,34 @@ mod tests {
             values.append(vec!["Iceberg"; 512].as_mut());
             let col4 = Arc::new(StringArray::from_iter_values(values)) as ArrayRef;
 
-            let to_write =
-                RecordBatch::try_new(schema.clone(), vec![col1, col2, col3, col4]).unwrap();
+            // dbl:
+            let mut values = vec![100.0f64; 512];
+            values.append(vec![150.0f64; 12].as_mut());
+            values.append(vec![200.0f64; 500].as_mut());
+            let col5 = Arc::new(Float64Array::from_iter_values(values)) as ArrayRef;
+
+            // i32:
+            let mut values = vec![100i32; 512];
+            values.append(vec![150i32; 12].as_mut());
+            values.append(vec![200i32; 500].as_mut());
+            let col6 = Arc::new(Int32Array::from_iter_values(values)) as ArrayRef;
+
+            // i64:
+            let mut values = vec![100i64; 512];
+            values.append(vec![150i64; 12].as_mut());
+            values.append(vec![200i64; 500].as_mut());
+            let col7 = Arc::new(Int64Array::from_iter_values(values)) as ArrayRef;
+
+            // bool:
+            let mut values = vec![false; 512];
+            values.append(vec![true; 512].as_mut());
+            let values: BooleanArray = values.into();
+            let col8 = Arc::new(values) as ArrayRef;
+
+            let to_write = RecordBatch::try_new(schema.clone(), vec![
+                col1, col2, col3, col4, col5, col6, col7, col8,
+            ])
+            .unwrap();
 
             // Write the Parquet files
             let props = WriterProperties::builder()
@@ -1181,6 +1262,7 @@ mod tests {
         let table_scan = table
             .scan()
             .snapshot_id(3051729675574597004)
+            .with_row_selection_enabled(true)
             .build()
             .unwrap();
         assert_eq!(table_scan.snapshot().snapshot_id(), 3051729675574597004);
@@ -1192,7 +1274,13 @@ mod tests {
         fixture.setup_manifest_files().await;
 
         // Create table scan for current snapshot and plan files
-        let table_scan = fixture.table.scan().build().unwrap();
+        let table_scan = fixture
+            .table
+            .scan()
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
+
         let mut tasks = table_scan
             .plan_files()
             .await
@@ -1206,17 +1294,17 @@ mod tests {
 
         assert_eq!(tasks.len(), 2);
 
-        tasks.sort_by_key(|t| t.data_file_path().to_string());
+        tasks.sort_by_key(|t| t.data_file_path.to_string());
 
         // Check first task is added data file
         assert_eq!(
-            tasks[0].data_file_path(),
+            tasks[0].data_file_path,
             format!("{}/1.parquet", &fixture.table_location)
         );
 
         // Check second task is existing data file
         assert_eq!(
-            tasks[1].data_file_path(),
+            tasks[1].data_file_path,
             format!("{}/3.parquet", &fixture.table_location)
         );
     }
@@ -1227,7 +1315,12 @@ mod tests {
         fixture.setup_manifest_files().await;
 
         // Create table scan for current snapshot and plan files
-        let table_scan = fixture.table.scan().build().unwrap();
+        let table_scan = fixture
+            .table
+            .scan()
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
 
@@ -1245,7 +1338,12 @@ mod tests {
         fixture.setup_manifest_files().await;
 
         // Create table scan for current snapshot and plan files
-        let table_scan = fixture.table.scan().build().unwrap();
+        let table_scan = fixture
+            .table
+            .scan()
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
 
         let mut plan_task: Vec<_> = table_scan
             .plan_files()
@@ -1278,7 +1376,13 @@ mod tests {
         fixture.setup_manifest_files().await;
 
         // Create table scan for current snapshot and plan files
-        let table_scan = fixture.table.scan().select(["x", "z"]).build().unwrap();
+        let table_scan = fixture
+            .table
+            .scan()
+            .select(["x", "z"])
+            .with_row_selection_enabled(true)
+            .build()
+            .unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
 
@@ -1303,7 +1407,9 @@ mod tests {
         // Filter: y < 3
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").less_than(Datum::long(3));
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1329,7 +1435,9 @@ mod tests {
         // Filter: y >= 5
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").greater_than_or_equal_to(Datum::long(5));
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1348,6 +1456,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_filter_double_eq() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: dbl == 150.0
+        let mut builder = fixture.table.scan();
+        let predicate = Reference::new("dbl").equal_to(Datum::double(150.0f64));
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 12);
+
+        let col = batches[0].column_by_name("dbl").unwrap();
+        let f64_arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(f64_arr.value(1), 150.0f64);
+    }
+
+    #[tokio::test]
+    async fn test_filter_int_eq() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: i32 == 150
+        let mut builder = fixture.table.scan();
+        let predicate = Reference::new("i32").equal_to(Datum::int(150i32));
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 12);
+
+        let col = batches[0].column_by_name("i32").unwrap();
+        let i32_arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(i32_arr.value(1), 150i32);
+    }
+
+    #[tokio::test]
+    async fn test_filter_long_eq() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: i64 == 150
+        let mut builder = fixture.table.scan();
+        let predicate = Reference::new("i64").equal_to(Datum::long(150i64));
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 12);
+
+        let col = batches[0].column_by_name("i64").unwrap();
+        let i64_arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(i64_arr.value(1), 150i64);
+    }
+
+    #[tokio::test]
+    async fn test_filter_bool_eq() {
+        let mut fixture = TableTestFixture::new();
+        fixture.setup_manifest_files().await;
+
+        // Filter: bool == true
+        let mut builder = fixture.table.scan();
+        let predicate = Reference::new("bool").equal_to(Datum::bool(true));
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
+        let table_scan = builder.build().unwrap();
+
+        let batch_stream = table_scan.to_arrow().await.unwrap();
+
+        let batches: Vec<_> = batch_stream.try_collect().await.unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 512);
+
+        let col = batches[0].column_by_name("bool").unwrap();
+        let bool_arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert!(bool_arr.value(1));
+    }
+
+    #[tokio::test]
     async fn test_filter_on_arrow_is_null() {
         let mut fixture = TableTestFixture::new();
         fixture.setup_manifest_files().await;
@@ -1355,7 +1563,9 @@ mod tests {
         // Filter: y is null
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").is_null();
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1372,7 +1582,9 @@ mod tests {
         // Filter: y is not null
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("y").is_not_null();
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1391,7 +1603,9 @@ mod tests {
         let predicate = Reference::new("y")
             .less_than(Datum::long(5))
             .and(Reference::new("z").greater_than_or_equal_to(Datum::long(4)));
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1425,7 +1639,9 @@ mod tests {
         let predicate = Reference::new("y")
             .less_than(Datum::long(5))
             .or(Reference::new("z").greater_than_or_equal_to(Datum::long(4)));
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1460,7 +1676,9 @@ mod tests {
         // Filter: a STARTSWITH "Ice"
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("a").starts_with(Datum::string("Ice"));
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1482,7 +1700,9 @@ mod tests {
         // Filter: a NOT STARTSWITH "Ice"
         let mut builder = fixture.table.scan();
         let predicate = Reference::new("a").not_starts_with(Datum::string("Ice"));
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1505,7 +1725,9 @@ mod tests {
         let mut builder = fixture.table.scan();
         let predicate =
             Reference::new("a").is_in([Datum::string("Sioux"), Datum::string("Iceberg")]);
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1528,7 +1750,9 @@ mod tests {
         let mut builder = fixture.table.scan();
         let predicate =
             Reference::new("a").is_not_in([Datum::string("Sioux"), Datum::string("Iceberg")]);
-        builder = builder.with_filter(predicate);
+        builder = builder
+            .with_filter(predicate)
+            .with_row_selection_enabled(true);
         let table_scan = builder.build().unwrap();
 
         let batch_stream = table_scan.to_arrow().await.unwrap();
@@ -1569,22 +1793,28 @@ mod tests {
         );
         let task = FileScanTask {
             data_file_path: "data_file_path".to_string(),
+            data_file_content: DataContentType::Data,
             start: 0,
             length: 100,
             project_field_ids: vec![1, 2, 3],
             predicate: None,
             schema: schema.clone(),
+            record_count: Some(100),
+            data_file_format: DataFileFormat::Parquet,
         };
         test_fn(task);
 
         // with predicate
         let task = FileScanTask {
             data_file_path: "data_file_path".to_string(),
+            data_file_content: DataContentType::Data,
             start: 0,
             length: 100,
             project_field_ids: vec![1, 2, 3],
             predicate: Some(BoundPredicate::AlwaysTrue),
             schema,
+            record_count: None,
+            data_file_format: DataFileFormat::Avro,
         };
         test_fn(task);
     }
