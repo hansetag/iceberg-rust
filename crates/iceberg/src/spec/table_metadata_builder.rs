@@ -24,8 +24,9 @@ use super::{
     FormatVersion, MetadataLog, PartitionSpec, PartitionSpecBuilder, Schema, SchemaRef, Snapshot,
     SnapshotLog, SnapshotReference, SortOrder, SortOrderRef, TableMetadata, UnboundPartitionSpec,
     UnboundPartitionSpecInterface as _, DEFAULT_PARTITION_SPEC_ID, DEFAULT_SCHEMA_ID, MAIN_BRANCH,
-    ONE_MINUTE_MS, PROPERTY_FORMAT_VERSION, PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT,
-    RESERVED_PROPERTIES, UNPARTITIONED_LAST_ASSIGNED_ID,
+    ONE_MINUTE_MS, PROPERTY_FORMAT_VERSION, PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX,
+    PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT, RESERVED_PROPERTIES,
+    UNPARTITIONED_LAST_ASSIGNED_ID,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::{TableCreation, TableUpdate};
@@ -880,7 +881,7 @@ impl TableMetadataBuilder {
         let max_size = self
             .metadata
             .properties
-            .get(PROPERTY_FORMAT_VERSION)
+            .get(PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX)
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(PROPERTY_METADATA_PREVIOUS_VERSIONS_MAX_DEFAULT)
             .max(1);
