@@ -17,13 +17,14 @@
 
 use std::sync::Arc;
 
+use opendal::raw::HttpClient;
 #[cfg(feature = "storage-azdls")]
 use opendal::services::AzdlsConfig;
 #[cfg(feature = "storage-gcs")]
 use opendal::services::GcsConfig;
 #[cfg(feature = "storage-s3")]
 use opendal::services::S3Config;
-use opendal::{Operator, Scheme};
+use opendal::{Configurator, Operator, Scheme};
 
 #[cfg(feature = "storage-azdls")]
 use super::storage_azdls;
@@ -49,7 +50,10 @@ pub(crate) enum Storage {
         config: Arc<S3Config>,
     },
     #[cfg(feature = "storage-azdls")]
-    Azdls { config: Arc<AzdlsConfig> },
+    Azdls {
+        config: Arc<AzdlsConfig>,
+        client: reqwest::Client,
+    },
     #[cfg(feature = "storage-gcs")]
     Gcs { config: Arc<GcsConfig> },
 }
@@ -57,7 +61,7 @@ pub(crate) enum Storage {
 impl Storage {
     /// Convert iceberg config to opendal config.
     pub(crate) fn build(file_io_builder: FileIOBuilder) -> crate::Result<Self> {
-        let (scheme_str, props) = file_io_builder.into_parts();
+        let (scheme_str, props, client) = file_io_builder.into_parts();
         let scheme = Self::parse_scheme(&scheme_str)?;
 
         match scheme {
@@ -68,7 +72,7 @@ impl Storage {
             #[cfg(feature = "storage-s3")]
             Scheme::S3 => Ok(Self::S3 {
                 scheme_str,
-                client: reqwest::Client::new(),
+                client: client.unwrap_or(reqwest::Client::new()),
                 config: super::s3_config_parse(props)?.into(),
             }),
             #[cfg(feature = "storage-gcs")]
@@ -78,6 +82,7 @@ impl Storage {
             #[cfg(feature = "storage-azdls")]
             Scheme::Azdls => Ok(Self::Azdls {
                 config: storage_azdls::azdls_config_parse(props)?.into(),
+                client: client.unwrap_or(reqwest::Client::new()),
             }),
             _ => Err(Error::new(
                 ErrorKind::FeatureUnsupported,
@@ -156,10 +161,15 @@ impl Storage {
                 }
             }
             #[cfg(feature = "storage-azdls")]
-            Storage::Azdls { config } => Ok((
-                Operator::from_config(config.as_ref().clone())?.finish(),
-                &path["azdls://".len()..],
-            )),
+            Storage::Azdls { config, client } => {
+                let builder = config
+                    .as_ref()
+                    .clone()
+                    .into_builder()
+                    .http_client(HttpClient::with(client.clone()));
+                let op = Operator::new(builder)?.finish();
+                Ok((op, &path["azdls://".len()..]))
+            }
             #[cfg(all(
                 not(feature = "storage-s3"),
                 not(feature = "storage-fs"),

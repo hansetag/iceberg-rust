@@ -174,6 +174,7 @@ pub struct FileIOBuilder {
     scheme_str: Option<String>,
     /// Arguments for operator.
     props: HashMap<String, String>,
+    pub(crate) client: Option<reqwest::Client>,
 }
 
 impl FileIOBuilder {
@@ -183,6 +184,7 @@ impl FileIOBuilder {
         Self {
             scheme_str: Some(scheme_str.to_string()),
             props: HashMap::default(),
+            client: None,
         }
     }
 
@@ -191,14 +193,15 @@ impl FileIOBuilder {
         Self {
             scheme_str: None,
             props: HashMap::default(),
+            client: None,
         }
     }
 
     /// Fetch the scheme string.
     ///
     /// The scheme_str will be empty if it's None.
-    pub(crate) fn into_parts(self) -> (String, HashMap<String, String>) {
-        (self.scheme_str.unwrap_or_default(), self.props)
+    pub(crate) fn into_parts(self) -> (String, HashMap<String, String>, Option<reqwest::Client>) {
+        (self.scheme_str.unwrap_or_default(), self.props, self.client)
     }
 
     /// Add argument for operator.
@@ -223,6 +226,12 @@ impl FileIOBuilder {
         Ok(FileIO {
             inner: Arc::new(storage),
         })
+    }
+
+    /// Set http client for file io.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
     }
 }
 
